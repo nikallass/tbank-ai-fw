@@ -1,3 +1,15 @@
+# Всё поднимается одной командой и переживает перезагрузку: restart-политика
+# возвращает контейнеры, а состояние лежит в томах, а не внутри них.
+#
+#     docker compose up -d --build            фаервол + вход
+#     docker compose --profile mcp-http up -d  плюс сам MCP по HTTP
+#
+# Что НЕ уезжает в контейнер: MCP по stdio. Его запускает сам клиент (Claude
+# Desktop, Claude Code) как дочерний процесс и разговаривает с ним через трубу —
+# в контейнере эту трубу держать некому. Для такого клиента MCP остаётся на
+# хосте и читает ту же сессию через TBANK_SESSION. Профиль mcp-http нужен
+# клиентам, умеющим HTTP-транспорт.
+
 services:
   firewall:
     build: ./firewall
@@ -10,8 +22,62 @@ services:
     volumes:
       - firewall-data:/data
     environment:
-      TZ: Europe/Moscow
+      TZ: ${TZ:-Europe/Moscow}
       TBANK_FW_DB: /data/firewall.db
+    restart: unless-stopped
+
+  authd:
+    build: ./mcp
+    container_name: tbank-authd
+    command: ["python", "-m", "src.authd"]
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      # Каталог сессии общий с тем, кто запускает MCP. Если MCP живёт на хосте
+      # (Claude Desktop), укажите здесь его путь в .env — иначе вход положит
+      # сессию туда, куда MCP не смотрит, и агент останется без доступа.
+      - ${TBANK_SESSION_DIR:-./data/session}:/session
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      TBANK_SESSION: /session/session.json
+      TBANK_FIREWALL_URL: http://firewall:8080
+      # Петля контейнера — не петля хоста, поэтому слушаем все интерфейсы
+      # внутри. Наружу это ничего не открывает: порт выше публикуется на
+      # 127.0.0.1 хоста.
+      TBANK_AUTHD_HOST: 0.0.0.0
+      TBANK_AUTHD_ORIGINS: ${TBANK_AUTHD_ORIGINS:-http://127.0.0.1:8080,http://localhost:8080}
+    # Файл сессии создаётся с правами 0600, и прочитать его должен тот, кто
+    # запускает MCP. На Linux это значит совпадение uid — см. .env.example.
+    user: "${TBANK_UID:-1000}:${TBANK_GID:-1000}"
+    depends_on:
+      - firewall
+    restart: unless-stopped
+
+  # Профиль, а не обычный сервис: большинству он не нужен. Claude Desktop
+  # поднимает локальный MCP по stdio и с этим сервисом не разговаривает.
+  mcp:
+    build: ./mcp
+    container_name: tbank-mcp
+    command: ["python", "-m", "src.server"]
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ${TBANK_SESSION_DIR:-./data/session}:/session
+    environment:
+      TZ: ${TZ:-Europe/Moscow}
+      TBANK_MCP_TRANSPORT: streamable-http
+      # 0.0.0.0 внутри контейнера, наружу порт всё равно опубликован только
+      # на петлю — см. ports выше.
+      TBANK_MCP_HOST: 0.0.0.0
+      TBANK_MCP_PORT: 8000
+      TBANK_SESSION: /session/session.json
+      TBANK_FIREWALL_URL: http://firewall:8080
+      TBANK_FIREWALL_FAILMODE: closed
+      TBANK_AGENT_NAME: ${TBANK_AGENT_NAME:-mcp-http}
+    user: "${TBANK_UID:-1000}:${TBANK_GID:-1000}"
+    depends_on:
+      - firewall
+    profiles: ["mcp-http"]
     restart: unless-stopped
 
 volumes:

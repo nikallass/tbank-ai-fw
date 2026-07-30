@@ -28,6 +28,7 @@ captures*.xml
 # Локальные настройки и секреты
 .env
 .env.*
+!.env.example
 .claude/settings.local.json
 *.bak
 *.bak-*

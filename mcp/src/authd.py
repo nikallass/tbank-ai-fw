@@ -32,7 +32,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOST = "127.0.0.1"
+# 127.0.0.1 по умолчанию: на хосте демон не должен быть виден никому снаружи.
+# В контейнере это значение бесполезно — петля контейнера не та же, что петля
+# хоста, и опубликованный порт до неё не дотягивается, — поэтому compose ставит
+# 0.0.0.0. Наружу это ничего не открывает: порт публикуется на 127.0.0.1 хоста.
+HOST = os.environ.get("TBANK_AUTHD_HOST", "127.0.0.1")
 PORT = int(os.environ.get("TBANK_AUTHD_PORT", "8765"))
 ORIGINS = [o.strip() for o in os.environ.get(
     "TBANK_AUTHD_ORIGINS",

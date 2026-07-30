@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+tests/
+skills/
+.claude-plugin/
+bin/
+login_cli.py
+ca/bundle.pem
+session.json
+*.jsonl
+captures*.xml
+*.har

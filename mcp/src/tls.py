@@ -53,7 +53,13 @@ SYSTEM_CA_CANDIDATES = [
     "/etc/ssl/cert.pem",
 ]
 ROOTS_DIR = os.path.join(_HERE, "..", "ca", "roots")
-BUNDLE = os.path.join(_HERE, "..", "ca", "bundle.pem")
+# Собранный бандл — производный файл, и писать его рядом с кодом можно только
+# там, где код лежит в доступном на запись каталоге. В контейнере это не так:
+# образ принадлежит root, а процесс запускается под uid пользователя, чтобы файл
+# сессии оставался читаемым на хосте. Без переопределения сборка бандла молча
+# не удавалась, и КАЖДЫЙ хост банка отваливался по TLS — при живой сессии и
+# работающей сети, что диагностируется отвратительно.
+BUNDLE = os.environ.get("TBANK_CA_BUNDLE") or os.path.join(_HERE, "..", "ca", "bundle.pem")
 
 # Roots committed to this repo, pinned by SHA-256 of their DER. A file whose
 # fingerprint does not match is NOT trusted — that is the whole point of shipping

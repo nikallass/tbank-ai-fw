@@ -24,7 +24,14 @@ from . import guard, trace
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
 from .observability import redact_text
 
-mcp = FastMCP("tbank")
+# Транспорт по умолчанию — stdio: именно так сервер запускает клиент (Claude
+# Desktop, Claude Code) на той же машине. В контейнере stdio бесполезен — некому
+# держать вторую сторону трубы, — поэтому host/port читаются из окружения и
+# main() умеет поднять HTTP-транспорт. Значения по умолчанию оставляют поведение
+# ровно прежним: 127.0.0.1 и stdio.
+mcp = FastMCP("tbank",
+              host=os.environ.get("TBANK_MCP_HOST", "127.0.0.1"),
+              port=int(os.environ.get("TBANK_MCP_PORT", "8000")))
 
 # Every @mcp.tool() below is recorded. Done by replacing the decorator ONCE rather
 # than touching 57 functions: a per-tool opt-in is a list somebody has to remember to
@@ -3192,7 +3199,17 @@ def firewall_policy() -> str:
 
 
 def main():
-    mcp.run()
+    """stdio по умолчанию — так сервер запускает локальный клиент.
+
+    `TBANK_MCP_TRANSPORT=streamable-http` поднимает HTTP-транспорт: нужен, когда
+    MCP живёт в контейнере и клиент подключается снаружи. Тогда же задайте
+    TBANK_MCP_HOST=0.0.0.0, иначе слушать будет только петлю внутри контейнера
+    и снаружи никто не достучится."""
+    transport = os.environ.get("TBANK_MCP_TRANSPORT", "stdio")
+    if transport != "stdio":
+        print(f"[tbank] transport={transport} на "
+              f"{mcp.settings.host}:{mcp.settings.port}", file=sys.stderr)
+    mcp.run(transport=transport)
 
 if __name__ == "__main__":
     main()

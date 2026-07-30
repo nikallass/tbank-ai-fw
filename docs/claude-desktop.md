@@ -30,11 +30,25 @@
 git clone <адрес этого репозитория> tbank-ai-fw
 cd tbank-ai-fw
 
-docker compose up -d --build      # вебморда на http://127.0.0.1:8080
+cp .env.example .env              # см. комментарии внутри: где хранить сессию
+docker compose up -d --build      # вебморда :8080, демон входа :8765
+```
 
+В `.env` укажите `TBANK_SESSION_DIR` — каталог, куда ляжет сессия банка. Claude
+Desktop запускает MCP на хосте, и он читает `~/.local/share/tbank-mcp/session.json`,
+поэтому проще всего указать именно его:
+
+```
+TBANK_SESSION_DIR=/Users/ваше-имя/.local/share/tbank-mcp
+```
+
+MCP останется на хосте — по-другому и нельзя: Claude Desktop запускает его
+дочерним процессом и говорит через трубу, а держать вторую сторону трубы в
+контейнере некому. Установить его нужно один раз:
+
+```bash
 cd mcp
 python3.11 -m venv .venv && .venv/bin/pip install -e .
-./bin/tbank-authd &               # демон входа, слушает только 127.0.0.1
 ```
 
 Откройте `http://127.0.0.1:8080/auth` и войдите: телефон → код из SMS → пароль.
