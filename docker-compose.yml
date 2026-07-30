@@ -27,7 +27,12 @@ services:
     restart: unless-stopped
 
   authd:
-    build: ./mcp
+    # Без браузера: форма входа его не открывает никогда.
+    build:
+      context: ./mcp
+      args:
+        WITH_BROWSER: "0"
+
     container_name: tbank-authd
     command: ["python", "-m", "src.authd"]
     ports:
@@ -56,7 +61,14 @@ services:
   # Профиль, а не обычный сервис: большинству он не нужен. Claude Desktop
   # поднимает локальный MCP по stdio и с этим сервисом не разговаривает.
   mcp:
-    build: ./mcp
+    # С браузером: этот контейнер исполняет туллы, а grocery_checkout гоняет
+    # чекаут продуктов в headless-chromium. Билеты, счета и переводы браузера
+    # не требуют — если продукты не нужны, соберите с TBANK_WITH_BROWSER=0.
+    build:
+      context: ./mcp
+      args:
+        WITH_BROWSER: "${TBANK_WITH_BROWSER:-1}"
+
     container_name: tbank-mcp
     command: ["python", "-m", "src.server"]
     ports:

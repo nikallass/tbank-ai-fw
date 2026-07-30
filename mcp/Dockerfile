@@ -4,10 +4,14 @@
 # их значило бы поддерживать две почти одинаковые сборки. Роль выбирается
 # командой в docker-compose.yml.
 #
-# Playwright и chromium НЕ ставятся: они нужны только продуктовому чекауту
-# (grocery_checkout), это ~150 МБ, и тащить их в образ, который в 99% случаев
-# поднимает форму входа, незачем. Кому нужен чекаут — собирайте с
-# `--build-arg WITH_BROWSER=1`.
+# Chromium ставится только там, где он нужен. Нужен он ровно одному тулу —
+# grocery_checkout: чекаут продуктов живёт в вебвью на www.tbank.ru, и его JS
+# сам заводит CSRF-токены, слоты доставки и веб-сессию. Без браузера этот шаг
+# не воспроизвести, остальные покупки (билеты, счета, переводы) — чистое API.
+#
+# Демон входа браузер не открывает никогда, поэтому его образ собирается с
+# WITH_BROWSER=0 и остаётся лёгким; образ MCP — с 1. Разные аргументы сборки =
+# разные образы, и это дешевле, чем таскать 400 МБ в контейнер формы логина.
 FROM python:3.12-slim
 
 ARG WITH_BROWSER=0
@@ -19,7 +23,11 @@ ENV PYTHONUNBUFFERED=1 \
     # Бандл доверенных корней собирается на лету и должен лежать там, куда
     # процесс может писать: контейнер работает под uid пользователя, а /srv
     # принадлежит root. Без этого падает TLS ко ВСЕМ хостам банка.
-    TBANK_CA_BUNDLE=/tmp/tbank-ca-bundle.pem
+    TBANK_CA_BUNDLE=/tmp/tbank-ca-bundle.pem \
+    # Браузер ставится под root на сборке, а работает контейнер под uid
+    # пользователя — в его $HOME (которого нет) playwright искать не должен.
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    HOME=/tmp
 
 WORKDIR /srv
 
@@ -30,7 +38,8 @@ COPY docs ./docs
 
 RUN pip install --no-cache-dir -e . \
     && if [ "$WITH_BROWSER" = "1" ]; then \
-         pip install --no-cache-dir playwright && python -m playwright install --with-deps chromium; \
+         python -m playwright install --with-deps chromium \
+         && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"; \
        fi
 
 # Каталог сессии монтируется снаружи. Создаём заранее, чтобы права на точке
