@@ -222,6 +222,40 @@ with TestClient(app) as c:
     check("чужая операция норму не расходует", quota_rule["quota_used"]["count"], 3)
     c.request("DELETE", f"/api/v1/rules/{made['id']}")
 
+    # ── выбор банка кликом ───────────────────────────────────────────────────
+    made = c.post("/api/v1/choice", json={
+        "recipient": "8 999 000-11-22", "amount": 10, "agent": "test",
+        "candidates": [
+            {"bank_name": "Т-Банк", "masked_fio": "", "bank_member_id": "100000000004",
+             "pointer_link_id": "1", "supported": False,
+             "unsupported_reason": "только в приложении банка"},
+            {"bank_name": "Сбербанк", "masked_fio": "О. М.",
+             "bank_member_id": "100000000111", "pointer_link_id": "2", "supported": True},
+        ]}).json()
+    cid = made["choice_id"]
+    check("выбор заведён", cid.startswith("chc_"), True)
+    check("состояние ждёт человека",
+          c.get(f"/api/v1/choice/{cid}").json()["state"], "pending")
+
+    # Недоступный банк выбрать нельзя — иначе платёж уйдёт в тупик.
+    bad = c.post(f"/api/v1/choice/{cid}/pick", json={"index": 0}).json()
+    check("недоступный банк не выбирается", bad["ok"], False)
+
+    picked = c.post(f"/api/v1/choice/{cid}/pick", json={"index": 1}).json()
+    check("выбор принят", picked["ok"], True)
+    check("вернулся выбранный банк", picked["chosen"]["bank_member_id"], "100000000111")
+    check("повторный выбор не проходит",
+          c.post(f"/api/v1/choice/{cid}/pick", json={"index": 1}).json()["ok"], False)
+
+    # Главное: реквизиты из ВНУТРЕННЕГО резолва теперь известны фаерволу, и
+    # перевод с ними проходит проверку. Раньше он же их и отвергал.
+    check("выбранные реквизиты принимаются проверкой",
+          c.post("/api/v1/authorize", json={"tool": "transfer", "args": {
+              "amount": 10, "to_account": "+79990001122",
+              "bank_member_id": "100000000111", "pointer_link_id": "2"}
+          }).json()["decision"], "hitl")
+    check("страница выбора отдаётся", c.get(f"/choice/{cid}").status_code, 200)
+
     # ── страницы отдаются ────────────────────────────────────────────────────
     for path in ("/", "/rules", "/lists", "/limits", "/visibility", "/settings",
                  "/auth", "/hitl", "/requests", f"/requests/{rid}", f"/hitl/{rid}"):

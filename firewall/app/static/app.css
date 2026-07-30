@@ -182,3 +182,15 @@ pre.code {
 .big-amount { font-size: 34px; font-weight: 700; letter-spacing: -.02em; }
 .warn { background: var(--amber-bg); border: 1px solid #F0DFA8; color: #6B4A00;
         padding: 12px 14px; border-radius: 12px; font-size: 14px; }
+
+/* ── выбор банка кликом ────────────────────────────────────────────────── */
+button.bank {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  background: #fff; border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 10px; font-weight: 500;
+}
+button.bank:hover:not(:disabled) { background: var(--yellow); border-color: transparent; }
+button.bank:disabled { opacity: .55; cursor: not-allowed; background: #FAFBFC; }
+button.bank .bank-name { font-weight: 600; font-size: 16px; }
+button.bank .bank-who { color: var(--ink-2); font-size: 14px; }
+button.bank .tag { margin-left: auto; }

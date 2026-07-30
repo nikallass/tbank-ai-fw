@@ -58,6 +58,16 @@ SBP_PHONE_POINTER_TYPE = "8276"
 TBANK_SBP_MEMBER_ID = "100000000004"
 
 
+def _with_candidates(err: "TbankApiError", resolved: list) -> "TbankApiError":
+    """Приложить список банков получателя к отказу «нужен выбор».
+
+    Текст отказа читает модель, а вебморде нужен структурированный список, чтобы
+    нарисовать кнопки. Держать его в атрибуте исключения дешевле, чем разбирать
+    собственное же сообщение обратно."""
+    err.candidates = resolved
+    return err
+
+
 def _need_store(app_id: str, point_id: str) -> tuple[str, str]:
     """Client-layer guard mirroring server._store(): grocery store-scope methods
     require explicit app_id/point_id — no silent 578/700 default."""
@@ -2994,23 +3004,23 @@ class MobileSession:
                         lines.append(f"  - {x['masked_fio'] or 'без имени'} | "
                                      f"{x['bank_name']}{mark}")
                     tail = (
-                        "\nДальше: спроси пользователя, какой банк, вызови "
-                        "transfer_sbp_resolve(phone) и возьми bank_member_id + "
-                        "pointer_link_id ИЗ ЕГО ОТВЕТА. Здесь они не приводятся "
-                        "намеренно: реквизиты живут минуты, а взятые из текста ошибки "
-                        "не пройдут проверку — она сверяет их со свежим резолвом.")
+                        "\nДальше вызови choose_recipient_bank(phone) — он покажет "
+                        "пользователю банки кнопками и вернёт реквизиты выбранного. "
+                        "Идентификаторы здесь не приводятся намеренно: они живут "
+                        "минуты, а взятые из текста ошибки проверку не пройдут.")
                     if not external:
-                        raise TbankApiError("RECIPIENT_INSIDE_TBANK",
+                        raise _with_candidates(TbankApiError("RECIPIENT_INSIDE_TBANK",
                             f"{to_account} в СБП есть только в этом же банке:\n" +
                             "\n".join(lines) +
                             "\nПеревод внутри банка по номеру телефона в этом туле не "
                             "реализован — в приложении банка он есть, это другой путь. "
                             "Скажи это пользователю прямо, не выдумывай обходных "
-                            "маршрутов и не утверждай, что такого банка у получателя нет.")
-                    raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
+                            "маршрутов и не утверждай, что такого банка у получателя нет."),
+                            resolved)
+                    raise _with_candidates(TbankApiError("RECIPIENT_MULTIPLE_BANKS",
                         f"{to_account} есть в {len(resolved)} банках СБП, и по "
                         f"умолчанию ведёт в этот же банк — нужен выбор:\n" +
-                        "\n".join(lines) + tail)
+                        "\n".join(lines) + tail), resolved)
                 pick = next((x for x in resolved if x["is_default_bank"]), None)
                 if pick is None and len(resolved) == 1:
                     pick = resolved[0]
@@ -3021,13 +3031,13 @@ class MobileSession:
                     # признает. Агент честно берёт их из текста ошибки, повторяет
                     # вызов и упирается в блокировку, которую сам же и вызвал.
                     # Плюс они живут минуты: pointerLinkId банк перевыпускает.
-                    raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
+                    raise _with_candidates(TbankApiError("RECIPIENT_MULTIPLE_BANKS",
                         f"{to_account} есть в {len(resolved)} банках СБП — нужен выбор:\n" +
                         "\n".join(f"  - {x['masked_fio'] or 'без имени'} | {x['bank_name']}"
                                   for x in resolved) +
-                        "\nДальше: спроси пользователя, какой банк, вызови "
-                        "transfer_sbp_resolve(phone) и возьми bank_member_id + "
-                        "pointer_link_id ИЗ ЕГО ОТВЕТА, а не отсюда.")
+                        "\nДальше вызови choose_recipient_bank(phone) — он покажет "
+                        "банки кнопками и вернёт реквизиты выбранного. Идентификаторы "
+                        "здесь не приводятся: они живут минуты."), resolved)
                 bank_member_id = pick["bank_member_id"]
                 masked_fio = pick["masked_fio"]
                 pointer_link_id = pick["pointer_link_id"]

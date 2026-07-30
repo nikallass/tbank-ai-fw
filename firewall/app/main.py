@@ -304,6 +304,102 @@ def request_result(req_id: str, payload: ResultIn) -> dict:
     return {"output": masked}
 
 
+class ChoiceIn(BaseModel):
+    recipient: str = ""
+    amount: float | None = None
+    from_account: str = ""
+    agent: str = ""
+    candidates: list[dict] = Field(default_factory=list)
+
+
+@app.post("/api/v1/choice")
+def choice_create(payload: ChoiceIn) -> dict:
+    """Завести выбор банка получателя — человек решит кликом.
+
+    Кандидаты приходят из резолва, который MCP сделал ВНУТРИ transfer(), мимо
+    тула `transfer_sbp_resolve`. Поэтому здесь же они запоминаются как выданные
+    банком: иначе фаервол про них не знает и потом сам отвергает реквизиты,
+    которые сам же и предложил выбрать."""
+    now = time.time()
+    ttl = int(db.get_setting("hitl_ttl_sec", "900"))
+    cid = "chc_" + uuid.uuid4().hex[:12]
+    recipient = facets_mod.norm_phone(payload.recipient) if payload.recipient else ""
+    db.run(
+        "INSERT INTO choices(id, created_at, expires_at, state, recipient, amount, "
+        "from_account, agent, candidates_json) VALUES (?,?,?,?,?,?,?,?,?)",
+        (cid, now, now + ttl, "pending", recipient, payload.amount,
+         payload.from_account, payload.agent,
+         json.dumps(payload.candidates, ensure_ascii=False)))
+    for c in payload.candidates:
+        bmi = str(c.get("bank_member_id") or "").strip()
+        plid = str(c.get("pointer_link_id") or "").strip()
+        if not recipient or not (bmi or plid):
+            continue
+        db.run(
+            "INSERT INTO resolved_requisites(recipient, bank_member_id, "
+            "pointer_link_id, bank_name, masked_fio, ts) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(recipient, bank_member_id, pointer_link_id) "
+            "DO UPDATE SET ts=excluded.ts, bank_name=excluded.bank_name, "
+            "masked_fio=excluded.masked_fio",
+            (recipient, bmi, plid, str(c.get("bank_name") or ""),
+             str(c.get("masked_fio") or ""), now))
+    base_url = db.get_setting("base_url").rstrip("/")
+    return {"choice_id": cid, "url": f"{base_url}/choice/{cid}", "ttl_sec": ttl}
+
+
+@app.get("/api/v1/choice/{choice_id}")
+def choice_state(choice_id: str) -> dict:
+    row = db.one("SELECT * FROM choices WHERE id=?", (choice_id,))
+    if row is None:
+        raise HTTPException(404, "нет такого выбора")
+    state = row["state"]
+    if state == "pending" and row["expires_at"] < time.time():
+        db.run("UPDATE choices SET state='expired' WHERE id=?", (choice_id,))
+        state = "expired"
+    return {"choice_id": choice_id, "state": state,
+            "recipient": row["recipient"], "amount": row["amount"],
+            "chosen": db.jload(row["chosen_json"], None),
+            "candidates": db.jload(row["candidates_json"], [])}
+
+
+@app.post("/api/v1/choice/{choice_id}/pick")
+def choice_pick(choice_id: str, payload: dict = Body(...)) -> dict:
+    row = db.one("SELECT * FROM choices WHERE id=?", (choice_id,))
+    if row is None:
+        raise HTTPException(404, "нет такого выбора")
+    if row["state"] != "pending":
+        return {"ok": False, "state": row["state"], "error": "выбор уже сделан"}
+    now = time.time()
+    if row["expires_at"] < now:
+        db.run("UPDATE choices SET state='expired' WHERE id=?", (choice_id,))
+        return {"ok": False, "state": "expired", "error": "срок выбора истёк"}
+    if payload.get("cancel"):
+        db.run("UPDATE choices SET state='cancelled', decided_at=? WHERE id=?",
+               (now, choice_id))
+        return {"ok": True, "state": "cancelled"}
+    cands = db.jload(row["candidates_json"], [])
+    try:
+        chosen = cands[int(payload.get("index"))]
+    except (TypeError, ValueError, IndexError):
+        raise HTTPException(400, "неверный номер варианта")
+    if not chosen.get("supported", True):
+        return {"ok": False, "state": "pending",
+                "error": "этот банк через MCP недоступен — выберите другой"}
+    db.run("UPDATE choices SET state='picked', chosen_json=?, decided_at=? WHERE id=?",
+           (json.dumps(chosen, ensure_ascii=False), now, choice_id))
+    return {"ok": True, "state": "picked", "chosen": chosen}
+
+
+@app.get("/choice/{choice_id}", response_class=HTMLResponse)
+def ui_choice(request: Request, choice_id: str):
+    row = db.one("SELECT * FROM choices WHERE id=?", (choice_id,))
+    if row is None:
+        raise HTTPException(404, "нет такого выбора")
+    return _page(request, "choice", row=dict(row),
+                 candidates=db.jload(row["candidates_json"], []),
+                 chosen=db.jload(row["chosen_json"], None))
+
+
 @app.get("/api/v1/visibility")
 def visibility() -> dict:
     modes = {r["tool"]: r["mode"] for r in db.rows("SELECT tool, mode FROM tool_modes")}

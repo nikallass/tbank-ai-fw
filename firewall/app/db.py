@@ -115,6 +115,25 @@ CREATE TABLE IF NOT EXISTS resolved_requisites (
 );
 CREATE INDEX IF NOT EXISTS idx_req_recipient ON resolved_requisites(recipient);
 
+-- Выбор банка получателя кликом. Заводится, когда у номера несколько банков СБП
+-- и решать должен человек, а не модель. Здесь же лежат реквизиты кандидатов,
+-- полученные РЕЗОЛВОМ ВНУТРИ transfer(): он идёт мимо тула transfer_sbp_resolve,
+-- поэтому иначе фаервол про них не узнаёт и потом сам же их отвергает.
+CREATE TABLE IF NOT EXISTS choices (
+    id           TEXT PRIMARY KEY,
+    created_at   REAL NOT NULL,
+    expires_at   REAL NOT NULL,
+    state        TEXT NOT NULL DEFAULT 'pending',  -- pending|picked|cancelled|expired
+    recipient    TEXT NOT NULL DEFAULT '',
+    amount       REAL,
+    from_account TEXT NOT NULL DEFAULT '',
+    agent        TEXT NOT NULL DEFAULT '',
+    candidates_json TEXT NOT NULL DEFAULT '[]',
+    chosen_json  TEXT NOT NULL DEFAULT '',
+    decided_at   REAL
+);
+CREATE INDEX IF NOT EXISTS idx_choices_state ON choices(state);
+
 CREATE TABLE IF NOT EXISTS hitl (
     request_id TEXT PRIMARY KEY,
     created_at REAL NOT NULL,

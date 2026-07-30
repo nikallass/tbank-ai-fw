@@ -18,7 +18,7 @@ import traceback
 from datetime import datetime, timedelta
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from . import guard, trace
 from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
@@ -144,6 +144,8 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
     "debug_report": ("Как использовали этот MCP", READ),
     # firewall — туллы про сам фаервол, а не про банк. Ничего не меняют ни в
     # банке, ни на диске: только читают состояние политики и подтверждений.
+    "choose_recipient_bank": ("Выбор банка получателя", READ),
+    "firewall_choice": ("Ожидание выбора банка", READ),
     "firewall_status": ("Статус подтверждения операции", READ),
     "firewall_pending": ("Что ждёт подтверждения владельца", READ),
     "firewall_policy": ("Что агенту разрешено", READ),
@@ -3136,6 +3138,129 @@ def flows(topic: str = "") -> str:
                 "\n\nВызови flows(topic) с одним из них.")
     scored.sort(key=lambda x: -x[0])
     return "\n\n".join(f"## {t}\n{b}" for _, t, b in scored[:3])
+
+
+# ── выбор банка получателя ───────────────────────────────────────────────────
+
+def _bank_options(resolved: list) -> list[dict]:
+    """Кандидаты в вид, пригодный и для кнопок, и для вебморды."""
+    from .client import TBANK_SBP_MEMBER_ID
+    out = []
+    for x in resolved:
+        internal = str(x.get("bank_member_id")) == TBANK_SBP_MEMBER_ID
+        out.append({
+            "bank_name": x.get("bank_name") or "банк без названия",
+            "masked_fio": x.get("masked_fio") or "",
+            "bank_member_id": x.get("bank_member_id"),
+            "pointer_link_id": x.get("pointer_link_id"),
+            "is_default_bank": bool(x.get("is_default_bank")),
+            "supported": not internal,
+            "unsupported_reason": "только в приложении банка" if internal else "",
+        })
+    return out
+
+
+def _option_label(o: dict) -> str:
+    bits = [o["bank_name"]]
+    if o["masked_fio"]:
+        bits.append(o["masked_fio"])
+    if not o["supported"]:
+        bits.append("НЕДОСТУПЕН: " + o["unsupported_reason"])
+    return " — ".join(bits)
+
+
+@mcp.tool()
+async def choose_recipient_bank(phone: str, ctx: Context) -> str:
+    """Спросить у пользователя, в какой банк переводить, и вернуть реквизиты.
+
+    Вызывай, когда transfer() ответил, что у номера несколько банков СБП. Тул сам
+    сходит за СВЕЖИМ резолвом и покажет пользователю варианты — кликом, если
+    клиент это умеет, иначе ссылкой на страницу выбора. Возвращает
+    bank_member_id и pointer_link_id выбранного банка: передай их в transfer()
+    сразу, не откладывая — они живут минуты.
+
+    Банк, совпадающий с нашим собственным, помечен недоступным: перевод внутри
+    банка по номеру телефона здесь не реализован (в приложении банка он есть)."""
+    try:
+        s = _require(); s.ensure_fresh()
+        resolved = s.resolve_sbp_recipient(phone)
+        if not resolved:
+            return f"{phone}: получатель не зарегистрирован в СБП (или неверный номер)."
+        options = _bank_options(resolved)
+        usable = [o for o in options if o["supported"]]
+        if not usable:
+            return (f"{phone}: единственный банк получателя — этот же банк, а перевод "
+                    f"внутри банка по номеру здесь не реализован. В приложении банка "
+                    f"он есть. Скажи это пользователю.")
+        if len(usable) == 1 and len(options) == 1:
+            o = usable[0]
+            return _picked_text(o)
+
+        # Кликабельные варианты. Клиент, который elicitation не умеет, ответит
+        # ошибкой или отказом — тогда уходим на страницу выбора в вебморде.
+        try:
+            from typing import Literal
+            from pydantic import BaseModel, Field, create_model
+            labels = [_option_label(o) for o in usable]
+            Schema = create_model(
+                "BankChoice",
+                bank=(Literal[tuple(labels)],
+                      Field(description="Банк получателя")),
+                __base__=BaseModel,
+            )
+            who = usable[0]["masked_fio"] or phone
+            res = await ctx.elicit(
+                message=f"{who}: в какой банк переводим?", schema=Schema)
+            if getattr(res, "action", "") == "accept":
+                chosen = usable[labels.index(res.data.bank)]
+                return _picked_text(chosen)
+            if getattr(res, "action", "") in ("decline", "cancel"):
+                return "Пользователь отказался от выбора банка. Перевод не делай."
+        except Exception as e:                                   # noqa: BLE001
+            print(f"[tbank] elicitation недоступна ({type(e).__name__}), "
+                  f"ухожу на страницу выбора", file=sys.stderr)
+
+        made = guard.create_choice(phone, options)
+        if not made:
+            return ("Выбрать банк не удалось: клиент не поддерживает кнопки, а "
+                    "фаервол недоступен. Перечисли банки пользователю сам:\n" +
+                    "\n".join("  - " + _option_label(o) for o in options))
+        return (f"Нужен выбор банка — открой и нажми:\n{made['url']}\n"
+                f"Затем вызови firewall_choice(\"{made['choice_id']}\", wait_sec=60) — "
+                f"он дождётся клика и вернёт реквизиты. Ход не заканчивай.")
+    except Exception as e:
+        return _err(e)
+
+
+def _picked_text(o: dict) -> str:
+    return (f"Банк выбран: {o['bank_name']}"
+            f"{(' — ' + o['masked_fio']) if o['masked_fio'] else ''}.\n"
+            f"Передай в transfer(): bank_member_id=\"{o['bank_member_id']}\", "
+            f"pointer_link_id=\"{o['pointer_link_id']}\""
+            f"{(', masked_fio=' + chr(34) + o['masked_fio'] + chr(34)) if o['masked_fio'] else ''}.\n"
+            f"Делай это сразу: реквизиты живут минуты, потом фаервол их не примет.")
+
+
+@mcp.tool()
+def firewall_choice(choice_id: str, wait_sec: int = 60) -> str:
+    """Дождаться, пока пользователь выберет банк на странице выбора.
+
+    Нужен только когда клиент не умеет кнопки и choose_recipient_bank() отдал
+    ссылку. wait_sec > 0 — ждать клика (до 180 с); вернулось «ещё не выбран» —
+    позови ещё раз, ход не заканчивая."""
+    try:
+        st = guard.await_choice(choice_id, min(max(int(wait_sec), 0), 180))
+    except Exception as e:
+        return f"Не удалось узнать выбор {choice_id}: {e}"
+    state = st.get("state", "unknown")
+    if state == "picked" and st.get("chosen"):
+        return _picked_text(st["chosen"])
+    if state == "pending":
+        return (f"{choice_id}: пользователь ещё не выбрал банк. Позови "
+                f"firewall_choice(\"{choice_id}\", wait_sec=60) ещё раз, ход не заканчивай.")
+    if state == "cancelled":
+        return "Пользователь отменил перевод. Не выполняй его."
+    return f"{choice_id}: выбор недоступен (состояние: {state})."
 
 
 # ── фаервол Bank AI Firewall ───────────────────────────────────────────────────────

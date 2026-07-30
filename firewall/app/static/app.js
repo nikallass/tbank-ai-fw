@@ -770,6 +770,38 @@ if (page === 'auth') {
   loadStatus();
 }
 
+/* ── страница: выбор банка ─────────────────────────────────────────────── */
+if (page === 'choice') {
+  const card = document.getElementById('choiceCard');
+  const cid = card.dataset.choice;
+
+  const send = async (body) => {
+    const res = await api.post(`/api/v1/choice/${cid}/pick`, body);
+    if (!res.ok) { alert(res.error || 'не удалось'); return; }
+    location.reload();
+  };
+
+  document.querySelectorAll('button.bank').forEach(b => b.onclick = () => {
+    b.disabled = true;
+    send({index: Number(b.dataset.index)});
+  });
+
+  const cancel = document.getElementById('btnCancelChoice');
+  if (cancel) cancel.onclick = () => {
+    if (!confirm('Отменить перевод?')) return;
+    send({cancel: true});
+  };
+
+  // Если выбор сделали с другого устройства — обновимся сами, чтобы страница
+  // не показывала кнопки, которые уже ничего не решают.
+  if (card.dataset.state === 'pending') {
+    setInterval(async () => {
+      const s = await api.get('/api/v1/choice/' + cid);
+      if (s.state !== 'pending') location.reload();
+    }, 5000);
+  }
+}
+
 /* ── страница: настройки ───────────────────────────────────────────────── */
 if (page === 'settings') {
   (async () => {

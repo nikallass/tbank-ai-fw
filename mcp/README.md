@@ -152,7 +152,8 @@ Russian and so is the person reading the answer.
 | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission` |
 | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
 | **Utility** | `flows`, `diagnostics`, `debug_report` |
-| **Firewall** | `firewall_status`, `firewall_pending`, `firewall_policy` |
+| **Firewall** | `firewall_status`, `firewall_pending`, `firewall_policy`, `firewall_choice` |
+| **Выбор** | `choose_recipient_bank` — банки получателя кнопками |
 
 `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
 

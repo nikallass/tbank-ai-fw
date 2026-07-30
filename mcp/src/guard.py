@@ -38,7 +38,7 @@ ENABLED = os.environ.get("TBANK_FIREWALL", "1") not in ("0", "false", "no", "")
 
 # Туллы самого фаервола: их нельзя проверять фаерволом, иначе агент, которому
 # отказали, не сможет даже узнать статус своего подтверждения.
-_BYPASS = {"firewall_status", "firewall_pending", "firewall_policy"}
+_BYPASS = {"firewall_status", "firewall_pending", "firewall_policy", "firewall_choice"}
 
 # Одна на процесс — сервер MCP запускается на сессию агента, и это самое близкое
 # к «одному прогону», что есть без изобретения протокола.
@@ -141,6 +141,38 @@ def await_decision(request_id: str, wait_sec: int = 0) -> dict:
 
 def pending() -> dict:
     return _get("/api/v1/pending")
+
+
+def create_choice(phone: str, options: list, amount=None, from_account: str = "") -> dict:
+    """Завести в фаерволе выбор банка. None, если фаервол недоступен.
+
+    Кандидаты уходят туда не только ради кнопок: резолв случился ВНУТРИ клиента,
+    мимо тула transfer_sbp_resolve, и без этой передачи фаервол про выданные
+    реквизиты не знает — а потом сам же их отвергает как неизвестные."""
+    try:
+        return _post("/api/v1/choice", {
+            "recipient": phone, "amount": amount, "from_account": from_account,
+            "agent": AGENT, "candidates": options})
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        print(f"[tbank-firewall] выбор банка не заведён: {e}", file=sys.stderr)
+        return {}
+
+
+def await_choice(choice_id: str, wait_sec: int = 0) -> dict:
+    """Состояние выбора, при wait_sec > 0 — дождавшись клика."""
+    state = _get(f"/api/v1/choice/{choice_id}")
+    if wait_sec <= 0 or state.get("state") != "pending":
+        return state
+    deadline = time.time() + wait_sec
+    while time.time() < deadline:
+        time.sleep(1.0)
+        try:
+            state = _get(f"/api/v1/choice/{choice_id}")
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+        if state.get("state") != "pending":
+            return state
+    return state
 
 
 def hidden_tools() -> set[str]:

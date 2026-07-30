@@ -640,7 +640,7 @@ def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
         check("pointerLinkId" not in str(e.message) and "pointer_link_id" not in
               str(e.message).split("возьми")[0],
               "отказ раздаёт pointerLinkId, который протухнет за минуты")
-        check("transfer_sbp_resolve" in str(e.message),
+        check("choose_recipient_bank" in str(e.message),
               "отказ не говорит, откуда брать реквизиты правильно")
 
     # Только свой банк — выбирать не из чего, отправляем в приложение.

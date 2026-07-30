@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Куда переводим?</h1>
+<p class="sub mono">{{ row.id }}</p>
+
+<div class="card" id="choiceCard" data-choice="{{ row.id }}" data-state="{{ row.state }}">
+  {% if row.amount %}<div class="big-amount">{{ "%.2f"|format(row.amount) }} ₽</div>{% endif %}
+  <p class="muted" style="margin:4px 0 0">
+    Получатель <span class="mono">{{ row.recipient }}</span>
+    {%- if row.from_account %}, со счёта <span class="mono">{{ row.from_account }}</span>{% endif %}
+  </p>
+
+  {% if row.state == 'pending' %}
+    <div class="warn" style="margin:14px 0">
+      У этого номера несколько банков в СБП. Деньги придут именно в тот, который
+      выберете — проверьте, что это нужный.
+    </div>
+    <div id="bankList">
+      {% for c in candidates %}
+        <button class="bank {{ 'ghost' if not c.get('supported', True) }}"
+                data-index="{{ loop.index0 }}"
+                {{ 'disabled' if not c.get('supported', True) }}>
+          <span class="bank-name">{{ c.bank_name or "банк не назван" }}</span>
+          <span class="bank-who">{{ c.masked_fio or "имя не указано" }}</span>
+          {% if c.is_default_bank %}<span class="tag read">по умолчанию</span>{% endif %}
+          {% if not c.get('supported', True) %}
+            <span class="tag off">{{ c.unsupported_reason or "недоступен" }}</span>
+          {% endif %}
+        </button>
+      {% endfor %}
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button class="danger" id="btnCancelChoice">Отменить перевод</button>
+    </div>
+  {% else %}
+    <p style="margin-top:14px">
+      <span class="tag {{ 'allow' if row.state == 'picked' else 'deny' }}">
+        {{ {'picked': 'банк выбран', 'cancelled': 'перевод отменён',
+            'expired': 'срок истёк'}.get(row.state, row.state) }}
+      </span>
+    </p>
+    {% if chosen %}
+      <p class="muted">Выбран: <b>{{ chosen.bank_name }}</b>
+        {%- if chosen.masked_fio %} · {{ chosen.masked_fio }}{% endif %}</p>
+      <p class="muted">Агент продолжит сам — возвращайтесь в чат.</p>
+    {% endif %}
+  {% endif %}
+</div>
+{% endblock %}
