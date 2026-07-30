@@ -2988,23 +2988,30 @@ class MobileSession:
                     raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
                         f"{to_account} по умолчанию ведёт в этот же банк, а такой "
                         f"перевод через СБП не проводится. Выбери ВНЕШНИЙ банк:\n" +
-                        "\n".join(f"  - {x['masked_fio']} | {x['bank_name']} | "
-                                  f"bankMemberId={x['bank_member_id']} | "
-                                  f"pointerLinkId={x['pointer_link_id']}"
+                        "\n".join(f"  - {x['masked_fio'] or 'без имени'} | {x['bank_name']}"
                                   for x in external) +
-                        "\nПередай выбранные bank_member_id + pointer_link_id в "
-                        "transfer(). Реквизиты живут недолго — бери их из СВЕЖЕГО "
-                        "transfer_sbp_resolve(), а не из старого ответа.")
+                        "\nДальше: спроси пользователя, какой банк, вызови "
+                        "transfer_sbp_resolve(phone) и возьми bank_member_id + "
+                        "pointer_link_id ИЗ ЕГО ОТВЕТА. Здесь они не приводятся "
+                        "намеренно: реквизиты живут минуты, а взятые из текста ошибки "
+                        "не пройдут проверку — она сверяет их со свежим резолвом.")
                 pick = next((x for x in resolved if x["is_default_bank"]), None)
                 if pick is None and len(resolved) == 1:
                     pick = resolved[0]
                 if pick is None:
+                    # Идентификаторы здесь НЕ печатаются намеренно. Этот резолв
+                    # прошёл внутри transfer(), мимо тула transfer_sbp_resolve, —
+                    # значит фаервол его не видел и выданные тут реквизиты не
+                    # признает. Агент честно берёт их из текста ошибки, повторяет
+                    # вызов и упирается в блокировку, которую сам же и вызвал.
+                    # Плюс они живут минуты: pointerLinkId банк перевыпускает.
                     raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
-                        f"{to_account} maps to {len(resolved)} SBP banks — pick one:\n" +
-                        "\n".join(f"  - {x['masked_fio']} | {x['bank_name']} | "
-                                  f"bankMemberId={x['bank_member_id']} | pointerLinkId={x['pointer_link_id']}"
+                        f"{to_account} есть в {len(resolved)} банках СБП — нужен выбор:\n" +
+                        "\n".join(f"  - {x['masked_fio'] or 'без имени'} | {x['bank_name']}"
                                   for x in resolved) +
-                        "\nPass the chosen bank_member_id + pointer_link_id to transfer().")
+                        "\nДальше: спроси пользователя, какой банк, вызови "
+                        "transfer_sbp_resolve(phone) и возьми bank_member_id + "
+                        "pointer_link_id ИЗ ЕГО ОТВЕТА, а не отсюда.")
                 bank_member_id = pick["bank_member_id"]
                 masked_fio = pick["masked_fio"]
                 pointer_link_id = pick["pointer_link_id"]

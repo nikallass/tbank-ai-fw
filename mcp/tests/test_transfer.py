@@ -618,10 +618,21 @@ def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
     except TbankApiError as e:
         check(e.result_code == "RECIPIENT_MULTIPLE_BANKS",
               f"не тот отказ: {e.result_code}")
-        check("100000000111" in str(e.message),
-              "в отказе нет внешнего банка, который можно выбрать")
-        check(TBANK_SBP_MEMBER_ID not in str(e.message),
-              "в списке для выбора остался свой же банк — его и выберут снова")
+        check("Сбербанк" in str(e.message),
+              "в отказе не назван внешний банк, который можно выбрать")
+        # Идентификаторы в тексте отказа — ловушка. Этот резолв прошёл ВНУТРИ
+        # transfer(), мимо тула transfer_sbp_resolve, поэтому фаервол его не
+        # видел и такие реквизиты не признает: агент берёт их из ошибки,
+        # повторяет вызов и упирается в блокировку, которую сам же и вызвал.
+        # Плюс pointerLinkId банк перевыпускает за минуты.
+        check("100000000111" not in str(e.message),
+              "отказ раздаёт bankMemberId — агент возьмёт его оттуда и получит "
+              "блокировку от фаервола")
+        check("pointerLinkId" not in str(e.message) and "pointer_link_id" not in
+              str(e.message).split("возьми")[0],
+              "отказ раздаёт pointerLinkId, который протухнет за минуты")
+        check("transfer_sbp_resolve" in str(e.message),
+              "отказ не говорит, откуда брать реквизиты правильно")
 
     # Только свой банк — выбирать не из чего, отправляем в приложение.
     s = Res([cand(TBANK_SBP_MEMBER_ID, "Т-Банк", "", True)])
