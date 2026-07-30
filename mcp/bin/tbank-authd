@@ -1,0 +1,26 @@
+#!/bin/sh
+# Демон входа. Держит форму логина из вебморды фаервола, пишет session.json
+# туда же, откуда её читает MCP. Запускается один раз и живёт в фоне —
+# в отличие от самого MCP, который поднимается на время сессии агента.
+#
+# Тот же bootstrap, что и в bin/tbank-mcp: venv и зависимости ставятся при
+# первом запуске. Здесь можно не бояться stdout — протокол MCP тут не ходит.
+set -e
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+VENV="$ROOT/.venv"
+PY="$VENV/bin/python"
+
+if [ ! -x "$PY" ]; then
+    echo "tbank-authd: creating venv at $VENV"
+    "${TBANK_PYTHON:-python3}" -m venv "$VENV"
+fi
+
+if ! "$PY" -c "import mcp" >/dev/null 2>&1; then
+    echo "tbank-authd: installing dependencies (first run only)"
+    "$PY" -m pip install --quiet --upgrade pip
+    "$PY" -m pip install --quiet -e "$ROOT"
+fi
+
+cd "$ROOT"
+exec "$PY" -m src.authd

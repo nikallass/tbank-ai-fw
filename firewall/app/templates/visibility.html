@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Зона видимости агента</h1>
+<p class="sub">Что агент вообще может увидеть и позвать. <b>Доступен</b> — работает по
+правилам. <b>Запрещён</b> — тул виден агенту, но любой вызов отклоняется (агент
+получает внятную причину). <b>Скрыт</b> — тула нет в списке инструментов вообще,
+агент про него не знает; применяется при следующем запуске MCP.</p>
+
+{% for cat, tools in groups.items() %}
+<div class="card">
+  <h2>{{ catalog.CATEGORIES.get(cat, cat) }}</h2>
+  <table>
+    <thead><tr><th style="width:38%">Тул</th><th style="width:14%">Тип</th><th>Режим</th></tr></thead>
+    <tbody>
+    {% for t in tools %}
+      <tr>
+        <td><b>{{ t.title }}</b><br><span class="mono muted">{{ t.tool }}</span></td>
+        <td><span class="tag {{ t.kind }}">{{ catalog.KIND_TITLES[t.kind] }}</span></td>
+        <td>
+          <select class="toolMode" data-tool="{{ t.tool }}" style="max-width:220px">
+            <option value="on"      {{ 'selected' if t.mode == 'on' }}>Доступен</option>
+            <option value="blocked" {{ 'selected' if t.mode == 'blocked' }}>Запрещён</option>
+            <option value="hidden"  {{ 'selected' if t.mode == 'hidden' }}>Скрыт</option>
+          </select>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endfor %}
+{% endblock %}

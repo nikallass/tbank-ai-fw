@@ -1,0 +1,516 @@
+diff --git a/README.md b/README.md
+index 9462130..75d7565 100644
+--- a/README.md
++++ b/README.md
+@@ -2,6 +2,13 @@
+ 
+ **T-Bank (Т-Банк) MCP** — mobile banking API server for Claude Code, Codex, ChatGPT, and other MCP-capable agents.
+ 
++> **Форк для Bank AI Firewall.** Эта копия отличается от
++> [upstream](https://github.com/icyberdeveloper/tbank-mcp) одним: каждый вызов тула
++> сначала спрашивает локальный фаервол (`src/guard.py`, врезка в `_traced_tool`), и
++> без его разрешения до банка ничего не доходит. Правила, лимиты, списки и
++> подтверждения живут в веб-приложении из `../firewall`. Отключается переменной
++> `TBANK_FIREWALL=0`. Подробности — в `../CLAUDE.md`.
++
+ ## Features
+ 
+ - **59 tools**: accounts, cards, documents, operations, grocery ordering, cinema and
+@@ -145,6 +152,7 @@ Russian and so is the person reading the answer.
+ | **Money** | `transfer_sbp_resolve`, `transfer`, `payment_commission` |
+ | **Invest** | `invest_accounts`, `invest_portfolio`, `invest_operations`, `invest_securities` |
+ | **Utility** | `flows`, `diagnostics`, `debug_report` |
++| **Firewall** | `firewall_status`, `firewall_pending`, `firewall_policy` |
+ 
+ `get_data(section)` covers 60+ endpoints: subscriptions, credit_schedule, statements, loans, invest_accounts, pension, etc. (`invest_portfolio` is a tool of its own, not a section — see the docstring for the full list.)
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index 11d289d..0a0e142 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,7 +5,11 @@ description = "MCP server for the T-Bank (Т-Банк) mobile personal-banking A
+ readme = "README.md"
+ requires-python = ">=3.11"
+ dependencies = [
+-  "mcp>=1.2",
++  # Верхняя граница обязательна. MCP SDK 2.0 переименовал `mcp.server.fastmcp`
++  # в `mcp.server.mcpserver`, и с `mcp>=1.2` чистая установка ставит 2.x, после
++  # чего server.py падает на импорте ещё до первого тула. Переезд на 2.x — это
++  # отдельная задача, а не побочный эффект `pip install`.
++  "mcp>=1.2,<2",
+   "requests>=2.32",
+   "playwright>=1.40",
+ ]
+diff --git a/skills/tbank/SKILL.md b/skills/tbank/SKILL.md
+index b603e78..b67c2d3 100644
+--- a/skills/tbank/SKILL.md
++++ b/skills/tbank/SKILL.md
+@@ -55,6 +55,28 @@ MCP работает с **настоящим банковским счётом 
+   без секретов. `flows(topic)` — порядок вызовов по конкретной теме
+   («перевод», «продукты», «билеты», «карты», «заказы», «кбжу», «поиск»).
+ 
++## Фаервол Bank AI Firewall — он стоит перед банком
++
++Каждый вызов сначала проходит через локальный фаервол владельца: он решает по
++правилам, лимитам и спискам, выполнить операцию, запретить её или спросить
++человека. Отвечать на это гаданием не нужно — фаервол сам пишет, что делать.
++
++- **«🚫 ЗАБЛОКИРОВАНО ФАЕРВОЛОМ»** — операция запрещена правилом. Повторять вызов
++  бессмысленно: пока владелец не поменяет правило, ответ будет тот же. Скажи
++  пользователю причину и дай ссылку из ответа.
++- **«⏳ НУЖНО ПОДТВЕРЖДЕНИЕ ВЛАДЕЛЬЦА»** — покажи пользователю ссылку и жди.
++  Потом `firewall_status(request_id)`: `approved` — повтори ТОТ ЖЕ вызов с ТЕМИ ЖЕ
++  аргументами (подтверждение выдано ровно на эту операцию и сработает один раз);
++  `pending` — ещё думают, вызов не повторяй; `denied`/`expired` — операция отменена.
++- `firewall_pending()` — что сейчас висит на подтверждении.
++- `firewall_policy()` — какие правила и лимиты действуют. Загляни туда ПЕРЕД тем,
++  как предлагать крупную операцию: если она заведомо за пределами лимита, честнее
++  сказать сразу.
++
++Не пытайся обойти отказ другим тулом, другой формулировкой аргументов или дроблением
++суммы на несколько переводов — это отдельно отслеживается лимитами по количеству
++операций, и для владельца выглядит как попытка обхода.
++
+ ## Правила, которые действуют везде
+ 
+ 1. **Деньги — только после подтверждения конкретной суммы.** `transfer`,
+diff --git a/src/client.py b/src/client.py
+index e9c639a..307e7ec 100644
+--- a/src/client.py
++++ b/src/client.py
+@@ -60,13 +60,57 @@ if not os.path.exists(_CA_BUNDLE):
+     _CA_BUNDLE = None
+ 
+ 
++# Факты ОДНОГО настоящего iPhone, снятые с живого трафика приложения (captures.xml
++# #1477, captures2.xml #595). Единственное описание устройства в этом клиенте:
++# отсюда их берёт и антифрод-блок платежа (PAY_DEVICE_DEFAULTS), и блоб, который
++# уходит при входе (_builtin_fingerprint).
++#
++# Раньше источников было два, и они разошлись: вход синтезировал «типовой» айфон
++# 1170×2532 с языком `ru`, а платёж посылал захваченный 1260×2736 с `ru-CY`. Одна
++# сессия, один deviceId, два разных телефона — и чинить это подгонкой платежа под
++# синтетику было бы неправильно: захват снят с живого приложения, а второй блоб
++# просто выдуман. Поэтому истина здесь одна, и она захваченная.
++#
++# `ru-CY` — локаль кипрского региона, и это осознанно оставленное свойство
++# захваченного устройства, а не опечатка. Переопределяется TBANK_DEVICE_LANGUAGE.
++CAPTURED_DEVICE = {
++    "device_screen_height": "2736",
++    "device_screen_width": "1260",
++    "language": "ru-CY",
++    "timezone": "180",
++}
++
++
+ def _builtin_fingerprint(device_id: str) -> str:
+     """A static, generic iOS device-attributes blob used as the anti-fraud
+     fingerprint at auth/step (and at refresh). It is device attributes only
+     (timezone, screen, OS version, the device id) — not a secret, not a
+     challenge-response. A real device produces a similar blob; a plausible
+-    generic one is accepted for scoring."""
++    generic one is accepted for scoring.
++
++    BUILT FROM `CAPTURED_DEVICE`, THE SAME FACTS THE PAYMENT BLOCK USES, and that
++    is the point. These two blobs describe the SAME phone to the same bank in the
++    same session — this one at login, PAY_DEVICE_PROFILE at /v1/pay. Left with
++    independent constants they drifted apart: login claimed a synthesised 1170×2532
++    phone with language `ru`, the payment sent the captured 1260×2736 with `ru-CY`.
++    One session, one deviceId, two different phones in two different countries —
++    exactly the contradiction an anti-fraud gate exists to find, while every read
++    kept working because reads carry no device block.
++
++    `TBANK_DEVICE_*` override both together, so a configured device stays one device.
++    """
+     import uuid as _uuid
++    # Пиксели — как в блоке оплаты; точки логического экрана = пиксели / dpi.
++    dpi = 3
++    px_w = int(os.environ.get("TBANK_DEVICE_SCREEN_WIDTH")
++               or CAPTURED_DEVICE["device_screen_width"])
++    px_h = int(os.environ.get("TBANK_DEVICE_SCREEN_HEIGHT")
++               or CAPTURED_DEVICE["device_screen_height"])
++    # Блок оплаты хочет локаль (`ru-CY`), этот — язык (`ru`). Одна настройка,
++    # два формата: иначе их снова пришлось бы держать в согласии руками.
++    language = (os.environ.get("TBANK_DEVICE_LANGUAGE")
++                or CAPTURED_DEVICE["language"]).split("-")[0].lower()
++    tz_name = os.environ.get("TBANK_DEVICE_TIMEZONE_NAME") or "Europe/Moscow"
+     blob = {
+         "identifierForVendor": device_id,
+         "tDeviceId": device_id,
+@@ -74,18 +118,18 @@ def _builtin_fingerprint(device_id: str) -> str:
+         "systemVersion": "17.5.1",
+         "appVersion": "7.31.6",
+         "bundleId": "com.idamob.tinkoff.android",
+-        "timeZoneName": "Europe/Moscow",
+-        "language": "ru",
++        "timeZoneName": tz_name,
++        "language": language,
+         "root_flag": "false",
+         "jailbreak": "false",
+         "emulator": 0,
+         "debug": 0,
+         "lockedDevice": 1,
+         "autologinUsed": False,
+-        "screenWidth": 390,
+-        "screenHeight": 844,
+-        "screenResolution": "1170*2532",
+-        "screenDpi": 3,
++        "screenWidth": px_w // dpi,
++        "screenHeight": px_h // dpi,
++        "screenResolution": f"{px_w}*{px_h}",
++        "screenDpi": dpi,
+         "systemFontSize": 17,
+         "labelFontSize": 17,
+         "frontCameraAvailable": True,
+@@ -811,12 +855,9 @@ class MobileSession:
+         "javaScriptEnabled": "true",
+         "notificationUrl": "https://api.t-bank-app.ru/v1/3ds",
+     }
+-    PAY_DEVICE_DEFAULTS = {
+-        "device_screen_height": "2736",
+-        "device_screen_width": "1260",
+-        "language": "ru-CY",
+-        "timezone": "180",
+-    }
++    # Те же захваченные факты, что и у блоба логина — см. CAPTURED_DEVICE наверху.
++    # Копия, а не ссылка: переопределение сессии не должно править общий словарь.
++    PAY_DEVICE_DEFAULTS = dict(CAPTURED_DEVICE)
+ 
+     # The hardware identifier. Deliberately NOT in PAY_DEVICE_DEFAULTS: that dict is
+     # spread wholesale into the /v1/pay query AND form (see _signed_parts), and no
+@@ -2245,8 +2286,20 @@ class MobileSession:
+         try:
+             data = resp.json()
+         except ValueError:
+-            resp.raise_for_status()
+-            raise TbankApiError("HTTP_" + str(resp.status_code), resp.text[:500])
++            # Тело ответа сохраняется, а не выбрасывается. Раньше здесь первым
++            # шёл raise_for_status(), и на любом не-JSON ответе наружу уходил
++            # голый HTTPError с одним лишь URL: живой 403 от /v1/pay читался как
++            # «403 Forbidden for url: …», а ЧТО именно сказал шлюз — терялось.
++            # Платёжный сервис отвечает конвертом с resultCode; не-JSON ответ
++            # приходит от края (WAF, лимитер, отлуп подписи), и его текст — это
++            # единственное, что вообще объясняет отказ.
++            body = (resp.text or "").strip()
++            err = TbankApiError("HTTP_" + str(resp.status_code),
++                                body[:500] or (resp.reason or "пустой ответ"))
++            # Код нужен вызывающему: 4xx — банк ответил и отказал (деньги на
++            # месте), 5xx — запрос мог быть принят. См. server._bank_refused.
++            err.response = resp
++            raise err
+         if isinstance(data, dict):
+             code = data.get("resultCode") or data.get("error") or ""
+             if code and code not in ("OK", "0", "success", ""):
+diff --git a/src/server.py b/src/server.py
+index d5835e1..f893e2d 100644
+--- a/src/server.py
++++ b/src/server.py
+@@ -20,7 +20,7 @@ from typing import Any
+ 
+ from mcp.server.fastmcp import FastMCP
+ from mcp.types import ToolAnnotations
+-from . import trace
++from . import guard, trace
+ from .client import MobileSession, TbankApiError, SessionExpired, ms_for_period
+ from .observability import redact_text
+ 
+@@ -135,6 +135,11 @@ TOOL_KINDS: dict[str, tuple[str, str]] = {
+     "flows": ("Порядок вызовов по теме", READ),
+     "diagnostics": ("События последних оплат", READ),
+     "debug_report": ("Как использовали этот MCP", READ),
++    # firewall — туллы про сам фаервол, а не про банк. Ничего не меняют ни в
++    # банке, ни на диске: только читают состояние политики и подтверждений.
++    "firewall_status": ("Статус подтверждения операции", READ),
++    "firewall_pending": ("Что ждёт подтверждения владельца", READ),
++    "firewall_policy": ("Что агенту разрешено", READ),
+ }
+ 
+ 
+@@ -159,11 +164,27 @@ def _annotations_for(name: str) -> ToolAnnotations:
+     return ToolAnnotations(**ann)
+ 
+ 
++# Туллы, скрытые владельцем в зоне видимости фаервола. Спрашивается один раз, на
++# импорте: список инструментов уходит клиенту на хендшейке, и позже он не меняется.
++# Пустое множество, если фаервол выключен или недоступен — тогда решает authorize.
++_HIDDEN = guard.hidden_tools()
++
++
+ def _traced_tool(*a, **kw):
++    """Регистрация тула: фаервол → трассировка → FastMCP.
++
++    Порядок обёрток намеренный. guard ВНУТРИ trace, поэтому в calls.jsonl попадают
++    и заблокированные вызовы: «агент семь раз попробовал перевод и семь раз получил
++    отказ» — это ровно то, ради чего трассировка заведена, и снаружи guard'а этого
++    было бы не видно."""
+     def register(fn):
+-        title, _ = TOOL_KINDS.get(fn.__name__, ("", ""))
+-        opts = {"title": title, "annotations": _annotations_for(fn.__name__), **kw}
+-        return _untraced_tool(*a, **opts)(trace.wrap(fn))
++        name = fn.__name__
++        title, kind = TOOL_KINDS.get(name, ("", ""))
++        if name in _HIDDEN:
++            print(f"[tbank-firewall] тул {name} скрыт зоной видимости", file=sys.stderr)
++            return fn
++        opts = {"title": title, "annotations": _annotations_for(name), **kw}
++        return _untraced_tool(*a, **opts)(trace.wrap(guard.wrap(fn, name, kind)))
+     return register
+ 
+ 
+@@ -518,15 +539,35 @@ def list_accounts() -> str:
+     except Exception as e:
+         return _err(e)
+ 
++# Статусы операций, как их отдаёт банк. Список открытый: незнакомый статус
++# печатается как есть, а не проглатывается — «неизвестный статус» лучше, чем
++# отсутствие пометки, потому что второе читается как «всё прошло».
++_STATUS_RU = {
++    "FAILED": "НЕ ПРОШЛА",
++    "HOLD": "ЗАБЛОКИРОВАНА (холд)",
++    "PENDING": "В ОБРАБОТКЕ",
++    "CANCELED": "ОТМЕНЕНА",
++    "CANCELLED": "ОТМЕНЕНА",
++}
++
++
+ @mcp.tool()
+ def list_operations(account_id: str, days: int = 30, limit: int = 50,
+-                    desc_len: int = 40) -> str:
+-    """Операции за период, новые сверху.
++                    desc_len: int = 40, with_payment_id: bool = False) -> str:
++    """Операции за период, новые сверху. ЭТО и есть проверка исхода перевода.
++
++    Неудавшаяся операция помечена «✗ НЕ ПРОШЛА»: банк возвращает по каждой
++    операции статус, и без него провалившийся перевод выглядел в выдаче ровно
++    как успешный — а сюда отправляют смотреть именно тогда, когда тул платежа
++    ответил «ИСХОД НЕИЗВЕСТЕН».
+ 
+     limit — сколько показать (0 = все). В шапке всегда указано, сколько операций
+     всего за период, поэтому видно, обрезан ли ответ.
+     desc_len — ширина колонки описания (0 = описание целиком). Обрезанное
+-    описание кончается на «…» — полный текст даст desc_len=0."""
++    описание кончается на «…» — полный текст даст desc_len=0.
++    with_payment_id=True — показать paymentId у тех операций, где он есть; по нему
++    берётся чек через payment_receipt(). По умолчанию выключено: он есть больше
++    чем у половины строк и мешает читать выдачу."""
+     try:
+         s = _require(); s.ensure_fresh()
+         start, end = ms_for_period(days)
+@@ -543,9 +584,20 @@ def list_operations(account_id: str, days: int = 30, limit: int = 50,
+         def sign(o):
+             return "-" if (o.get("type") == "Debit") else "+"
+         def render(o):
+-            return (f"- [{when(o)}] {sign(o)}{(o.get('amount') or {}).get('value','?')} "
++            # Статус печатается ТОЛЬКО когда он не OK. Приписка «OK» к каждой из
++            # сорока строк — шум, из которого глаз перестаёт вылавливать
++            # единственную важную; а вот пропущенный FAILED стоит перевода,
++            # который сочли ушедшим.
++            st = str(o.get("status") or "")
++            mark = "" if st in ("OK", "") else f" ✗ {_STATUS_RU.get(st, st)}"
++            pid = ""
++            if with_payment_id:
++                pay = o.get("payment")
++                pid_val = pay.get("paymentId") if isinstance(pay, dict) else None
++                pid = f" | paymentId={pid_val}" if pid_val else ""
++            return (f"- [{when(o)}]{mark} {sign(o)}{(o.get('amount') or {}).get('value','?')} "
+                     f"{((o.get('amount') or {}).get('currency') or {}).get('name','')} | "
+-                    f"{_cut(o.get('description') or '', desc_len)}")
++                    f"{_cut(o.get('description') or '', desc_len)}{pid}")
+         return _rows_out(ops, render, limit=limit, total=len(ops),
+                          header=f"[account {account_id}] операции за {days} дн.")
+     except Exception as e:
+@@ -1384,6 +1436,35 @@ def _transfer_key(amount, to_account, provider, from_account) -> str:
+ _TRANSFER_BLOCKING = {"posting", "unknown"}
+ 
+ 
++def _bank_refused(e: BaseException) -> bool:
++    """Правда ли, что банк ОТВЕТИЛ и отказал — то есть деньги точно на месте.
++
++    Различие не косметическое. «Исход неизвестен» говорит пользователю, что деньги
++    могли уйти, и включает защиту от дублей: следующий такой же перевод не пройдёт
++    без force. Платить эту цену стоит только за настоящую неизвестность.
++
++    Две ситуации, где исход ИЗВЕСТЕН:
++      • конверт ошибки от банка — TbankApiError, запрос разобран и отвергнут;
++      • HTTP 4xx — шлюз ответил кодом. Он попадал в «неизвестно» вместе с
++        обрывами связи, потому что requests поднимает HTTPError, а тот наследует
++        RequestException. Живой 403 от /v1/pay из-за антифрода читался как
++        «деньги могли списаться», и снять блокировку повтора можно было только
++        force — на платеже, который банк открыто отверг.
++
++    408 и 429 остаются неизвестностью: там запрос мог быть принят и отложен.
++    5xx — тоже: сервер мог упасть уже после списания.
++    """
++    import requests as _rq
++    status = getattr(getattr(e, "response", None), "status_code", 0) or 0
++    if status:
++        # Код известен — он и решает. Проверять что-то ещё нельзя: не-JSON 502
++        # тоже приходит как TbankApiError, и без этой ветки он бы считался
++        # отказом, хотя запрос мог быть принят.
++        return 400 <= status < 500 and status not in (408, 429)
++    return (isinstance(e, (TbankApiError, SessionExpired))
++            and not isinstance(e, _rq.exceptions.RequestException))
++
++
+ def _transfer_blocked(key: str):
+     from . import journal
+     last = journal.latest_for_cart(key)
+@@ -1474,9 +1555,7 @@ def transfer(amount: float, to_account: str, description: str = "",
+             #     was rejected, so no money moved.
+             # Only a transport failure — timeout, reset, DNS — leaves the result
+             # genuinely unknown, because the POST may have arrived.
+-            import requests as _rq
+-            answered_or_refused = isinstance(e, (TbankApiError, SessionExpired))
+-            if answered_or_refused and not isinstance(e, _rq.exceptions.RequestException):
++            if _bank_refused(e):
+                 journal.record(attempt, "pay", "failed", user_payment_ms=int(upid),
+                                error=str(e)[:160])
+                 return (f"Перевод НЕ выполнен: {_err(e)}\n"
+@@ -1614,9 +1693,7 @@ def pay_bill(provider_id: str, fields: str, amount: float, group: str = "",
+             res = s.pay_bill(provider_id, vals, float(amount), account=src,
+                              user_payment_id=upid) or {}
+         except Exception as e:
+-            import requests as _rq
+-            answered = isinstance(e, (TbankApiError, SessionExpired))
+-            if answered and not isinstance(e, _rq.exceptions.RequestException):
++            if _bank_refused(e):
+                 journal.record(attempt, "pay", "failed", user_payment_ms=int(upid),
+                                error=str(e)[:160])
+                 return (f"Платёж НЕ выполнен: {_err(e)}\nЗапрос не прошёл, деньги на "
+@@ -2907,10 +2984,12 @@ def insurance_policies() -> str:
+ def payment_receipt(payment_id: str, save_to: str = "") -> str:
+     """Скачать PDF-чек по платежу. save_to — путь файла (по умолчанию /tmp).
+ 
+-    payment_id берётся ровно из пяти мест, других производителей нет:
+-    orders() (поле paymentId в строке заказа), grocery_order_status(),
+-    и ответы transfer(), pay_bill() и ticket_pay(). В list_operations() его НЕТ —
+-    операция и платёж нумеруются по-разному."""
++    payment_id берётся из ответов transfer(), pay_bill(), ticket_pay(), из
++    orders() (поле paymentId в строке заказа), grocery_order_status() — и из
++    list_operations(with_payment_id=True): банк кладёт его в поле payment
++    большинства операций. Здесь раньше стояло «в list_operations его НЕТ»,
++    и это было неверно — из-за чего чек по уже проведённому платежу считался
++    недостижимым, если ответ тула оплаты потерялся."""
+     try:
+         s = _require(); s.ensure_fresh()
+         pdf = s.payment_receipt_pdf(payment_id)
+@@ -2999,6 +3078,119 @@ def flows(topic: str = "") -> str:
+     return "\n\n".join(f"## {t}\n{b}" for _, t, b in scored[:3])
+ 
+ 
++# ── фаервол Bank AI Firewall ───────────────────────────────────────────────────────
++#
++# Ответная часть к веб-морде: агент, которому сказали «иди и подтверди»,
++# должен уметь узнать, чем кончилось, не гадая и не дёргая перевод вслепую.
++# Эти три тула не ходят в банк и не проверяются самим фаерволом (иначе агент,
++# которому отказали, не смог бы даже спросить почему) — см. guard._BYPASS.
++
++@mcp.tool()
++def firewall_status(request_id: str, wait_sec: int = 60) -> str:
++    """Статус подтверждения операции у владельца. request_id — из ответа фаервола.
++
++    wait_sec > 0 — ДОЖДАТЬСЯ решения, не возвращаясь раньше времени (до 180 с).
++    Это и есть штатный способ довести операцию до конца: показал пользователю
++    ссылку → вызвал этот тул → он вернулся сам, как только человек нажал кнопку.
++    Вернулось pending — время вышло, а решения нет: позови ещё раз.
++    wait_sec=0 — просто посмотреть статус и сразу вернуться.
++
++    approved — повтори ТОТ ЖЕ вызов с ТЕМИ ЖЕ аргументами, он пройдёт один раз.
++    pending — владелец ещё не решил, вызов НЕ повторяй.
++    denied/expired — операция отменена, не повторяй её и скажи об этом пользователю."""
++    try:
++        # Ждём здесь, а не в самом денежном туле: FastMCP выполняет синхронные
++        # туллы прямо в event loop, и ожидание внутри transfer() остановило бы
++        # весь MCP-сервер. Этот тул дешёвый, в банк не ходит и блокирует только
++        # себя — а пользователь к этому моменту уже видит ссылку в чате.
++        s = guard.await_decision(request_id, min(max(int(wait_sec), 0), 180))
++    except Exception as e:
++        return f"Не удалось узнать статус {request_id}: {e}"
++    state = s.get("hitl_state") or s.get("status") or "unknown"
++    human = {
++        "approved": "ПОДТВЕРЖДЕНО — повтори тот же вызов с теми же аргументами.",
++        "pending": (f"ЖДЁТ РЕШЕНИЯ владельца. Время ожидания вышло, решения пока нет — "
++                    f"вызови firewall_status(\"{request_id}\", wait_sec=60) ещё раз, "
++                    f"не заканчивая ход. Сам вызов операции НЕ повторяй."),
++        "denied": "ОТКЛОНЕНО владельцем — не повторяй, сообщи пользователю.",
++        "expired": "СРОК ИСТЁК — подтверждение не получено, операция не выполнена.",
++    }.get(state, f"состояние: {state}")
++    note = f"\nКомментарий владельца: {s['note']}" if s.get("note") else ""
++    return (f"{request_id}: {human}\n"
++            f"Операция: {s.get('tool')} "
++            f"{('на ' + str(s.get('amount')) + ' ₽') if s.get('amount') else ''}\n"
++            f"Причина проверки: {s.get('reason', '')}{note}")
++
++
++@mcp.tool()
++def firewall_pending() -> str:
++    """Что сейчас ждёт подтверждения владельца. Пусто — значит ничего не висит."""
++    try:
++        rows = guard.pending().get("pending") or []
++    except Exception as e:
++        return f"Фаервол недоступен: {e}"
++    if not rows:
++        return "Ничего не ждёт подтверждения."
++    out = [f"Ждут решения владельца — {len(rows)}:"]
++    for r in rows:
++        amount = f" на {r['amount']} ₽" if r.get("amount") else ""
++        to = f" → {r['recipient']}" if r.get("recipient") else ""
++        out.append(f"- {r['request_id']}: {r['tool']}{amount}{to} "
++                   f"(осталось {max(0, r.get('expires_in_sec', 0)) // 60} мин)\n"
++                   f"  {r.get('reason', '')}\n  {r.get('url', '')}")
++    return "\n".join(out)
++
++
++@mcp.tool()
++def firewall_policy() -> str:
++    """Правила, по которым фаервол пропускает или блокирует вызовы.
++
++    Полезно посмотреть ПЕРЕД тем, как предлагать пользователю операцию: если она
++    заведомо запрещена, честнее сказать об этом сразу, чем упереться в отказ."""
++    try:
++        rules = guard._get("/api/v1/rules").get("rules") or []
++        limits = guard._get("/api/v1/limits").get("limits") or []
++        settings = guard._get("/api/v1/settings")
++    except Exception as e:
++        return f"Фаервол недоступен: {e}"
++    words = {"allow": "разрешить", "deny": "запретить", "hitl": "спросить владельца"}
++    windows = {"hour": "в час", "day": "в сутки", "week": "в неделю", "month": "в месяц"}
++    out = ["Политика фаервола (первое совпавшее правило решает):"]
++    for r in rules:
++        if not r.get("enabled"):
++            continue
++        line = f"  {r['priority']:>4}. {r['name']} → {words.get(r['action'], r['action'])}"
++        # Норма без подтверждения: агенту полезно знать, сколько её осталось,
++        # чтобы не тратить попытки на операцию, которая всё равно спросит человека.
++        if r.get("quota_window"):
++            used = r.get("quota_used") or {}
++            caps = []
++            if r.get("quota_max_count") is not None:
++                caps.append(f"{used.get('count', 0)} из {r['quota_max_count']} раз")
++            if r.get("quota_max_amount") is not None:
++                caps.append(f"{used.get('amount', 0):.0f} из {r['quota_max_amount']:.0f} ₽")
++            if caps:
++                line += (f"\n         норма {windows.get(r['quota_window'], r['quota_window'])}: "
++                         f"{', '.join(caps)}, дальше — "
++                         f"{words.get(r.get('quota_on_exceed'), 'спросить владельца')}")
++        out.append(line)
++    out.append("По умолчанию: чтение — {}, изменения — {}, деньги — {}.".format(
++        words.get(settings.get("default_read"), "?"),
++        words.get(settings.get("default_write"), "?"),
++        words.get(settings.get("default_money"), "?")))
++    active = [l for l in limits if l.get("enabled")]
++    if active:
++        out.append("Лимиты:")
++        for l in active:
++            cap = []
++            if l.get("max_amount") is not None:
++                cap.append(f"{l['max_amount']:.0f} ₽")
++            if l.get("max_count") is not None:
++                cap.append(f"{l['max_count']} операций")
++            out.append(f"  - {l['name']}: {' и '.join(cap)} ({l['window']})")
++    return "\n".join(out)
++
++
+ def main():
+     mcp.run()
+ 

@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Вход в банк</h1>
+<p class="sub">Форма здесь, а сессия — не здесь. Введённое уходит <b>напрямую в локальный
+демон</b> на вашей машине, минуя этот фаервол: он не видит пароль, не хранит токены и не
+пишет их в журнал. Сессия ложится в файл, из которого её читает MCP.</p>
+
+<div class="card" id="statusCard">
+  <div class="row">
+    <h2 style="margin:0">Состояние сессии</h2>
+    <div class="spacer"></div>
+    <button class="ghost sm" id="btnCheck">Проверить связь с банком</button>
+    <button class="ghost sm" id="btnRefresh">Обновить</button>
+  </div>
+  <div id="statusBody" style="margin-top:14px"><span class="muted">загружаю…</span></div>
+</div>
+
+<div class="card" id="daemonHelp" hidden>
+  <h2>Демон входа не запущен</h2>
+  <p>Он живёт на вашей машине рядом с MCP — в контейнер его убирать нельзя, иначе
+  сессия банка окажется внутри фаервола. Запустите один раз и оставьте в фоне:</p>
+  <pre class="code">cd mcp &amp;&amp; ./bin/tbank-authd</pre>
+  <p class="hint">Слушает только 127.0.0.1. Адрес настраивается на странице
+  «Настройки» (<span class="mono">authd_url</span>), сейчас — <span class="mono" id="authdUrl"></span>.</p>
+</div>
+
+<div class="card" id="loginCard">
+  <h2>Войти</h2>
+
+  <div id="stepPhone">
+    <label for="inPhone">Номер телефона</label>
+    <input type="text" id="inPhone" placeholder="+7 999 123-45-67" autocomplete="tel">
+    <div class="row" style="margin-top:14px">
+      <button id="btnPhone">Получить код в SMS</button>
+    </div>
+  </div>
+
+  <div id="stepOtp" hidden>
+    <p class="muted" style="margin-top:0">Код отправлен на <span id="phoneShown" class="mono"></span></p>
+    <label for="inOtp">Код из SMS</label>
+    <input type="text" id="inOtp" inputmode="numeric" autocomplete="one-time-code">
+    <div class="row" style="margin-top:14px">
+      <button id="btnOtp">Подтвердить</button>
+      <button class="ghost" id="btnCancel">Отменить вход</button>
+    </div>
+  </div>
+
+  <div id="stepPassword" hidden>
+    <div class="warn" style="margin-bottom:14px">
+      Пароль уходит с этой страницы прямо в локальный демон
+      (<span class="mono" id="authdUrl2"></span>). Через фаервол он не проходит и
+      в контекст модели не попадает.
+    </div>
+    <label for="inPassword">Пароль от аккаунта</label>
+    <input type="password" id="inPassword" autocomplete="off">
+    <div class="row" style="margin-top:14px">
+      <button id="btnPassword">Войти</button>
+      <button class="ghost" id="btnCancel2">Отменить вход</button>
+    </div>
+  </div>
+
+  <div id="stepPin" hidden>
+    <label for="inPin">PIN приложения</label>
+    <input type="password" id="inPin" inputmode="numeric" autocomplete="off">
+    <div class="row" style="margin-top:14px">
+      <button id="btnPin">Подтвердить</button>
+      <button class="ghost" id="btnCancel3">Отменить вход</button>
+    </div>
+  </div>
+
+  <div id="authMsg" style="margin-top:14px"></div>
+</div>
+
+<div class="card">
+  <h2>Почему так</h2>
+  <p class="muted" style="margin-top:0">
+  Войти в банк можно тремя способами, и два из них плохи. Через агента — пароль
+  оказывается в контексте модели и в логах клиента. Через <span class="mono">login_cli.py</span> —
+  безопасно, но это терминал и три шага вслепую. Хранить сессию в вебморде — значит
+  положить доступ к деньгам в контейнер, который смотрит в браузер.</p>
+  <p class="muted">Поэтому вход разложен надвое: форму рисует фаервол, а вводимое
+  принимает демон на хосте и кладёт сессию туда, откуда её и так читает MCP —
+  <span class="mono" id="sessFile">~/.local/share/tbank-mcp/session.json</span>, права 0600.</p>
+</div>
+{% endblock %}

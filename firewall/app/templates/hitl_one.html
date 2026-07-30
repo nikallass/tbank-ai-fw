@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="muted" style="margin:0 0 6px"><a href="/hitl">← ко всем подтверждениям</a></p>
+<h1>Подтвердите операцию</h1>
+<p class="sub mono">{{ row.id }}</p>
+
+<div class="card" id="decisionCard" data-req="{{ row.id }}"
+     data-state="{{ hitl.state if hitl else 'none' }}">
+  {% if row.amount %}
+    <div class="big-amount">{{ "%.2f"|format(row.amount) }} ₽</div>
+  {% endif %}
+  <p style="font-size:17px;margin:6px 0 2px"><b>{{ subject }}</b></p>
+  <p class="muted" style="margin:0 0 14px">Причина: {{ row.reason }}</p>
+
+  {% if hitl and hitl.state == 'pending' %}
+    <div class="warn" style="margin-bottom:14px">
+      Проверьте сумму и получателя. Это реальные деньги: агент попросил их списать,
+      подтверждение выдаётся ровно на эту операцию и один раз.
+    </div>
+    <label for="hitlNote">Комментарий (необязательно, попадёт в журнал)</label>
+    <input type="text" id="hitlNote" placeholder="например: да, это за квартиру">
+    <div class="row" style="margin-top:14px">
+      <button class="ok" id="btnApprove">Подтвердить</button>
+      <button class="danger" id="btnDeny">Отклонить</button>
+      <div class="spacer"></div>
+      <span class="muted" id="ttl"></span>
+    </div>
+  {% else %}
+    <p><span class="tag {{ 'allow' if hitl and hitl.state == 'approved' else 'deny' }}">
+      {{ {'approved':'подтверждено','denied':'отклонено','expired':'истекло'}.get(hitl.state, hitl.state) if hitl else 'нет подтверждения' }}
+    </span></p>
+    {% if hitl and hitl.note %}<p class="muted">Комментарий: {{ hitl.note }}</p>{% endif %}
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Что именно просит агент</h2>
+  <dl class="kv">
+    <dt>Тул</dt><dd class="mono">{{ row.tool }} — {{ catalog.title_of(row.tool) }}</dd>
+    <dt>Категория</dt><dd>{{ catalog.CATEGORIES.get(row.category, row.category) }}</dd>
+    {% if facets.recipient %}<dt>Получатель</dt><dd class="mono">{{ facets.recipient }}{% if facets.recipient_name %} · {{ facets.recipient_name }}{% endif %}</dd>{% endif %}
+    {% if facets.from_account %}<dt>Счёт списания</dt><dd class="mono">{{ facets.from_account }}</dd>{% endif %}
+    {% if facets.org %}<dt>Организация / заказ</dt><dd class="mono">{{ facets.org }}</dd>{% endif %}
+    {% if facets.text %}<dt>Текст</dt><dd>{{ facets.text }}</dd>{% endif %}
+    <dt>Агент</dt><dd>{{ row.agent or "—" }}</dd>
+  </dl>
+  <h2 style="margin-top:18px">Аргументы вызова</h2>
+  <pre class="code">{{ args_pretty }}</pre>
+</div>
+{% endblock %}

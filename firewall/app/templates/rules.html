@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row" style="margin-bottom:4px">
+  <h1 style="margin:0">Правила</h1>
+  <div class="spacer"></div>
+  <button id="btnNewRule">Новое правило</button>
+</div>
+<p class="sub">Разбираются сверху вниз по приоритету, <b>первое совпавшее решает</b> —
+как ACL на фаерволе. Если не совпало ни одно, действует политика по умолчанию из
+настроек. Лимиты проверяются после правил и могут ужесточить решение.</p>
+
+<div class="card" id="rulesCard">
+  <div id="rulesList"></div>
+</div>
+
+<div class="card">
+  <h2>Проверить правило, не тратя денег</h2>
+  <p class="muted" style="margin-top:0">Прогоняет придуманный вызов через текущую политику и
+  показывает, что решил бы фаервол. Ничего не записывается и никуда не отправляется.</p>
+  <div class="inline">
+    <div>
+      <label for="simTool">Тул</label>
+      <select id="simTool"></select>
+    </div>
+    <div>
+      <label for="simAmount">Сумма, ₽</label>
+      <input type="number" id="simAmount" value="5000" step="0.01">
+    </div>
+    <div>
+      <label for="simRecipient">Получатель</label>
+      <input type="text" id="simRecipient" value="+79991234567">
+    </div>
+    <div>
+      <label for="simText">Текст / назначение</label>
+      <input type="text" id="simText" placeholder="за обед">
+    </div>
+  </div>
+  <div class="row" style="margin-top:14px">
+    <button id="btnSimulate">Проверить</button>
+  </div>
+  <div id="simResult" style="margin-top:14px"></div>
+</div>
+{% endblock %}

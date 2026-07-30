@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ settings.ui_title }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <!-- Щит, а не буква: знак не должен напоминать марку конкретного банка.
+       Это инструмент владельца счёта, а не продукт его банка. -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23FFDD2D'/><path d='M16 6l7 3v6c0 5-3 8.5-7 10-4-1.5-7-5-7-10V9z' fill='%23111'/></svg>">
+</head>
+<body data-page="{{ nav }}">
+<header class="top">
+  <a class="brand" href="/">
+    <span class="logo" aria-hidden="true">
+      <svg viewBox="0 0 32 32" width="18" height="18">
+        <path d="M16 4l9 4v7c0 6.2-3.8 10.7-9 12.4C10.8 25.7 7 21.2 7 15V8z"
+              fill="currentColor"/>
+      </svg>
+    </span>
+    <span class="brand-text"><b>Bank&nbsp;AI</b><small>Firewall</small></span>
+  </a>
+  <nav>
+    <a href="/"           class="{{ 'on' if nav == 'index' }}">Обзор</a>
+    <a href="/hitl"       class="{{ 'on' if nav in ('hitl','hitl_one') }}">Подтверждения <span class="badge" id="pendingBadge" hidden>0</span></a>
+    <a href="/requests"   class="{{ 'on' if nav in ('requests','request_detail') }}">Журнал</a>
+    <a href="/rules"      class="{{ 'on' if nav == 'rules' }}">Правила</a>
+    <a href="/lists"      class="{{ 'on' if nav == 'lists' }}">Списки</a>
+    <a href="/limits"     class="{{ 'on' if nav == 'limits' }}">Лимиты</a>
+    <a href="/visibility" class="{{ 'on' if nav == 'visibility' }}">Видимость</a>
+    <a href="/auth"       class="{{ 'on' if nav == 'auth' }}">Вход <span class="dot" id="sessionDot" title="статус сессии банка"></span></a>
+    <a href="/settings"   class="{{ 'on' if nav == 'settings' }}">Настройки</a>
+  </nav>
+  <script>window.AUTHD_URL = {{ settings.authd_url | tojson }};</script>
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+<div id="modalRoot"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

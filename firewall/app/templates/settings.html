@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Настройки</h1>
+<p class="sub">Политика по умолчанию применяется, когда не совпало ни одно правило.
+Сценарий подтверждения определяет, что происходит с вызовом, пока вы думаете.</p>
+
+<div class="card">
+  <h2>Политика по умолчанию</h2>
+  <div class="inline">
+    <div>
+      <label for="default_read">Чтение данных</label>
+      <select id="default_read" data-setting>
+        <option value="allow">Разрешать</option>
+        <option value="hitl">Спрашивать</option>
+        <option value="deny">Запрещать</option>
+      </select>
+    </div>
+    <div>
+      <label for="default_write">Изменения без денег</label>
+      <select id="default_write" data-setting>
+        <option value="allow">Разрешать</option>
+        <option value="hitl">Спрашивать</option>
+        <option value="deny">Запрещать</option>
+      </select>
+    </div>
+    <div>
+      <label for="default_money">Операции с деньгами</label>
+      <select id="default_money" data-setting>
+        <option value="allow">Разрешать</option>
+        <option value="hitl">Спрашивать</option>
+        <option value="deny">Запрещать</option>
+      </select>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Сценарий подтверждения (HITL)</h2>
+  <div class="inline">
+    <div>
+      <label for="hitl_mode">Что делает агент, пока вы решаете</label>
+      <select id="hitl_mode" data-setting>
+        <option value="async">Получает ссылку и отпускает вызов</option>
+        <option value="wait">Ждёт вашего решения внутри вызова</option>
+      </select>
+    </div>
+    <div>
+      <label for="hitl_ttl_sec">Срок жизни подтверждения, сек</label>
+      <input type="number" id="hitl_ttl_sec" data-setting min="30" step="30">
+    </div>
+    <div>
+      <label for="hitl_wait_sec">Сколько секунд ждать в режиме «ждёт»</label>
+      <input type="number" id="hitl_wait_sec" data-setting min="10" step="10">
+    </div>
+  </div>
+  <p class="hint">«Отпускает вызов» — агент сразу получает ссылку на подтверждение,
+  показывает её вам и потом сам проверяет статус через <span class="mono">firewall_status()</span>.
+  «Ждёт» — вызов висит до вашего нажатия или до таймаута; удобно, когда вы рядом.</p>
+</div>
+
+<div class="card">
+  <h2>Что агент видит в ответах</h2>
+  <div class="check">
+    <input type="checkbox" id="mask_pan" data-setting-check>
+    <label for="mask_pan">Маскировать номера карт и CVV в ответах тулов</label>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Защита от выдуманных реквизитов</h2>
+  <div class="check">
+    <input type="checkbox" id="require_resolved_requisites" data-setting-check>
+    <label for="require_resolved_requisites">Не пускать перевод по реквизитам СБП,
+      которых банк не возвращал</label>
+  </div>
+  <p class="hint">Идентификаторы банка получателя (<span class="mono">bankMemberId</span>,
+  <span class="mono">pointerLinkId</span>) невозможно вывести из номера телефона — их
+  отдаёт только <span class="mono">transfer_sbp_resolve</span>. Если у модели не вышло
+  их получить, она склонна подставить правдоподобные цифры и пойти платить; так уже
+  было. Фаервол сверяет присланное с тем, что банк действительно называл, и
+  сочинённый маршрут не пропускает. Проверка идёт раньше правил и разрешающим
+  правилом не отменяется.</p>
+</div>
+  <label for="mask_rules_json">Свои маски (JSON: список объектов с полями pattern и replacement)</label>
+  <textarea id="mask_rules_json" data-setting class="mono"></textarea>
+  <p class="hint">Пример: <span class="mono">[{"pattern": "\\d{20}", "replacement": "&lt;счёт скрыт&gt;"}]</span></p>
+</div>
+
+<div class="card">
+  <h2>Адрес вебморды</h2>
+  <label for="base_url">Ссылки, которые фаервол отдаёт агенту</label>
+  <input type="text" id="base_url" data-setting>
+  <p class="hint">Именно этот адрес агент покажет вам, когда попросит подтверждение.
+  Он должен открываться в вашем браузере.</p>
+
+  <label for="authd_url">Демон входа на вашей машине</label>
+  <input type="text" id="authd_url" data-setting>
+  <p class="hint">Страница «Вход» ходит по этому адресу <b>из браузера напрямую</b>,
+  мимо фаервола — поэтому пароль сюда не попадает. Демон запускается командой
+  <span class="mono">mcp/bin/tbank-authd</span> и слушает только 127.0.0.1.
+  Если меняете порт, добавьте адрес вебморды в
+  <span class="mono">TBANK_AUTHD_ORIGINS</span>, иначе браузер завернёт запрос.</p>
+</div>
+
+<div class="row">
+  <button id="btnSaveSettings">Сохранить</button>
+  <span id="settingsSaved" class="muted"></span>
+</div>
+{% endblock %}

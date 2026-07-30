@@ -1,0 +1,184 @@
+:root {
+  --yellow: #FFDD2D;
+  --yellow-dark: #F5C800;
+  --ink: #131313;
+  --ink-2: #5B5B5B;
+  --line: #E4E6E8;
+  --bg: #F3F4F6;
+  --card: #FFFFFF;
+  --green: #128A46;
+  --green-bg: #E7F5ED;
+  --red: #D5152B;
+  --red-bg: #FDECEE;
+  --amber: #9A6600;
+  --amber-bg: #FFF6DA;
+  --radius: 14px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+}
+
+a { color: inherit; }
+
+/* ── шапка ─────────────────────────────────────────────────────────────── */
+.top {
+  background: var(--yellow);
+  padding: 0 22px;
+  display: flex;
+  align-items: center;
+  gap: 26px;
+  height: 60px;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  box-shadow: 0 1px 0 rgba(0,0,0,.08);
+}
+.brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+.logo {
+  width: 32px; height: 32px; border-radius: 8px; background: var(--ink); color: var(--yellow);
+  display: grid; place-items: center; font-weight: 700; font-size: 19px;
+}
+.logo svg { display: block; }
+.brand-text { display: flex; flex-direction: column; line-height: 1.1; }
+.brand-text small { font-size: 11px; color: rgba(0,0,0,.55); letter-spacing: .04em; text-transform: uppercase; }
+.top nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.top nav a {
+  padding: 7px 12px; border-radius: 9px; text-decoration: none; font-weight: 500;
+  color: rgba(0,0,0,.72); white-space: nowrap;
+}
+.top nav a:hover { background: rgba(0,0,0,.07); color: #000; }
+.top nav a.on { background: var(--ink); color: var(--yellow); }
+.badge {
+  display: inline-grid; place-items: center; min-width: 19px; height: 19px; padding: 0 5px;
+  border-radius: 10px; background: var(--red); color: #fff; font-size: 11px; font-weight: 700;
+  margin-left: 4px; vertical-align: 1px;
+}
+
+/* Индикатор сессии банка в шапке. Серый — входа нет, зелёный — жива,
+   жёлтый — устарела, красный — файл битый, полый — демон не запущен. */
+.dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: #B9BEC4; margin-left: 5px; vertical-align: 1px;
+}
+.dot.ok   { background: var(--green); }
+.dot.warn { background: #E08A00; }
+.dot.bad  { background: var(--red); }
+.dot.down { background: transparent; border: 2px solid rgba(0,0,0,.32); width: 9px; height: 9px; }
+
+main { max-width: 1180px; margin: 0 auto; padding: 24px 22px 80px; }
+
+h1 { font-size: 25px; margin: 0 0 4px; }
+h2 { font-size: 17px; margin: 0 0 12px; }
+.sub { color: var(--ink-2); margin: 0 0 22px; max-width: 78ch; }
+
+/* ── карточки ──────────────────────────────────────────────────────────── */
+.card {
+  background: var(--card); border-radius: var(--radius); padding: 18px 20px;
+  border: 1px solid var(--line); margin-bottom: 16px;
+}
+.grid { display: grid; gap: 14px; }
+.grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; }
+.stat .n { font-size: 30px; font-weight: 700; letter-spacing: -.02em; }
+.stat .l { color: var(--ink-2); font-size: 13px; margin-top: 2px; }
+.stat.ok .n { color: var(--green); }
+.stat.no .n { color: var(--red); }
+.stat.wait .n { color: var(--amber); }
+
+/* ── таблицы ───────────────────────────────────────────────────────────── */
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--ink-2); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--line);
+}
+td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+tbody tr.clickable:hover { background: #FAFBFC; cursor: pointer; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
+.muted { color: var(--ink-2); }
+.nowrap { white-space: nowrap; }
+
+/* ── теги решений ──────────────────────────────────────────────────────── */
+.tag {
+  display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 12px;
+  font-weight: 600; white-space: nowrap;
+}
+.tag.allow  { background: var(--green-bg); color: var(--green); }
+.tag.deny   { background: var(--red-bg);   color: var(--red); }
+.tag.hitl   { background: var(--amber-bg); color: var(--amber); }
+.tag.read   { background: #EEF1F4; color: #46525E; }
+.tag.write  { background: #E8F0FE; color: #1550A0; }
+.tag.money  { background: #FFE9C7; color: #8A4B00; }
+.tag.off    { background: #EEF1F4; color: #7A8590; }
+
+/* ── кнопки ────────────────────────────────────────────────────────────── */
+button, .btn {
+  font: inherit; font-weight: 600; border: none; border-radius: 10px; padding: 9px 16px;
+  background: var(--yellow); color: var(--ink); cursor: pointer; text-decoration: none;
+  display: inline-block;
+}
+button:hover, .btn:hover { background: var(--yellow-dark); }
+button.ghost, .btn.ghost { background: #EEF0F2; }
+button.ghost:hover { background: #E2E5E8; }
+button.danger { background: var(--red); color: #fff; }
+button.danger:hover { background: #B31023; }
+button.ok { background: var(--green); color: #fff; }
+button.ok:hover { background: #0E6E38; }
+button.sm { padding: 5px 11px; font-size: 13px; border-radius: 8px; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row.end { justify-content: flex-end; }
+.spacer { flex: 1; }
+
+/* ── формы ─────────────────────────────────────────────────────────────── */
+label { display: block; font-size: 13px; color: var(--ink-2); margin: 12px 0 4px; font-weight: 500; }
+input[type=text], input[type=number], select, textarea {
+  width: 100%; font: inherit; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 10px; background: #fff; color: var(--ink);
+}
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--yellow); border-color: transparent; }
+textarea { min-height: 74px; resize: vertical; }
+.check { display: flex; align-items: center; gap: 8px; margin: 10px 0; }
+.check input { width: 17px; height: 17px; accent-color: var(--ink); }
+.check label { margin: 0; color: var(--ink); font-size: 14px; }
+.inline { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+
+/* ── модалка ───────────────────────────────────────────────────────────── */
+.modal-bg {
+  position: fixed; inset: 0; background: rgba(15,17,20,.45); display: grid;
+  place-items: center; z-index: 50; padding: 20px;
+}
+.modal {
+  background: #fff; border-radius: 18px; padding: 22px; width: min(720px, 100%);
+  max-height: 88vh; overflow: auto;
+}
+.modal h2 { margin-bottom: 2px; }
+
+/* ── условия правила ───────────────────────────────────────────────────── */
+.cond {
+  display: grid; grid-template-columns: 1.1fr 1fr 1.2fr auto; gap: 8px;
+  align-items: center; margin-bottom: 8px;
+}
+.cond button { padding: 8px 10px; }
+.entry { display: grid; grid-template-columns: 130px 1fr 1fr auto; gap: 8px; margin-bottom: 8px; }
+
+.empty { text-align: center; color: var(--ink-2); padding: 34px 10px; }
+.pill-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.kv { display: grid; grid-template-columns: 190px 1fr; gap: 6px 14px; }
+.kv dt { color: var(--ink-2); font-size: 13px; }
+.kv dd { margin: 0; }
+pre.code {
+  background: #14161A; color: #E6E9EC; padding: 14px 16px; border-radius: 12px;
+  overflow: auto; font-size: 12.5px; line-height: 1.5;
+}
+.hint { font-size: 13px; color: var(--ink-2); margin-top: 6px; }
+.big-amount { font-size: 34px; font-weight: 700; letter-spacing: -.02em; }
+.warn { background: var(--amber-bg); border: 1px solid #F0DFA8; color: #6B4A00;
+        padding: 12px 14px; border-radius: 12px; font-size: 14px; }

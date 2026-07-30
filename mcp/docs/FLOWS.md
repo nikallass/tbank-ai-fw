@@ -1,0 +1,344 @@
+# T-Bank MCP — agent flows
+
+Ordered tool-call sequences for common tasks. The session self-refreshes
+(`ensure_fresh` → silent re-login, no OTP) on the first call of each flow, so you
+don't call `refresh_session` manually unless a tool returns SESSION EXPIRED.
+
+Served section-by-section by the `flows(topic)` tool — call it with no argument
+for the list of topics. Reading the whole file is rarely what you want.
+
+> **Tool names:** the **62 MCP tools** and their docstrings are the authoritative
+> interface. Some sections below describe INTERNAL api steps — e.g. the web
+> checkout + HMAC signing run INSIDE `grocery_checkout` / `transfer`. Call the MCP
+> tools, not the internal methods named in the prose (`pay`, `payment_gate_pay`,
+> `active_loans` are NOT MCP tools — and there is no raw `pay` to drop down to when
+> a flow is unsupported; unsupported means the app).
+
+## 0. Bootstrap (first-time login)
+
+**First-time login = phone → OTP (SMS) → password → session.**
+Not just OTP — the bank requires the account password on the first login
+on a new device. `login(phone)` returns which step is next (otp/password/pin).
+Call the matching `confirm_*` tool.
+
+1. `login(phone)` → SMS OTP sent (or password step). phone = full form, e.g. `+7XXXXXXXXXX`.
+2. `confirm_otp(otp)` → if bank returns `step: password`, continue.
+3. `confirm_password(password)` → session minted. Persists `session.json`.
+
+## 1. Session / login (automatic, no OTP)
+
+The MCP does this itself on first call or when the access_token nears expiry
+(~2h). Documented so you understand why no phone is needed:
+
+1. (internal) `auth/authorize` gorod-app + `SSO_SESSION` cookie → `{step:fingerprint, cid}`
+2. (internal) `auth/step` `step=fingerprint` + static fingerprint blob → `{code}`
+3. (internal) `auth/token/mobile` auth_code grant → `access_token` + `mobile.sessionid` + `refresh_token` (SSO-valid)
+4. (messenger only) `issueTokenBySSO` {ssoToken} → `tmsgSessionID`
+
+You normally just call a read tool; the above runs under the hood. Call
+`session_status` / `keepalive` to check/extend.
+
+## 2. Read accounts + recent purchases + spending
+
+1. `list_accounts` → accounts + cards (take an `account.id`).
+2. `list_operations(account_id, days=30)` → recent purchases. `limit=0` shows
+   every operation of the period; `desc_len=0` prints descriptions whole (the
+   40-char column marks its cuts with «…»).
+3. `spending_categories(account_id, days=30)` → spend grouped by category (+ share %).
+   (or `operations_histogram(account_id, days, period, group_by)` for flexible
+   breakdown by category/merchant/mcc.)
+
+## 3. Grocery cart assembly → order → pay  (Город) — PROVEN end-to-end
+
+> **Store context is mandatory.** Get `app_id`/`point_id` from
+> `grocery_stores(sort_by)` — which also reports each store's nearest delivery
+> window, its price and the minimum order, and sorts by `speed`/`price`/`min_sum`
+> when the user names a criterion — and pass
+> them to `grocery_search` / `grocery_plan_order` / `grocery_add_to_cart` /
+> `grocery_set_cart` / `grocery_cart` /
+> `grocery_checkout`. There is NO silent default store — without explicit context the tools
+> return `NO_STORE_CONTEXT`, and mixing contexts makes the cart look empty. Keep app_id/pointId
+> identical across the whole add → cart → checkout flow.
+
+1. `grocery_search(query, app_id, point_id, limit)` → find goods by name and get
+   their `id`, which every cart call addresses them by. The header separates
+   shown / matched / what the store returned; `limit=0` shows every match.
+   (`grocery_plan_order` does the
+   same for a whole shopping list at once, and `grocery_rank` sorts the hits —
+   see §10.)
+2. `grocery_add_to_cart` (adds) / `grocery_set_cart` (absolute counts, `count: 0` removes, `clear=True` empties) → both go through cart/set on the
+   mobile API, which REPLACES the whole cart — there is no delete endpoint, so
+   removing an item means resending the list without it. The `delivery` block it builds
+   has three non-obvious requirements, all capture-verified — get any of them wrong
+   and cart/set answers HTTP 200 while storing nothing, so the next GET reads empty:
+   - **`address.details`** (flat, houseType, doorphone, …) must be complete, and
+     `details.streetWithType` is client-side — no GET returns it, copy it from `street`.
+   - **`address` cannot come from the store's own cart.** A store the user has never
+     ordered from HAS no cart, so there is no address to copy and the write is
+     rejected — which means no cart is ever created and the next attempt fails the
+     same way. Seed from `GET /api/grocery/client/info` → `payload.deliveryInfo.address`.
+   - **`areaId`** is per-retailer and REQUIRED by the retailers that publish one
+     (ВкусВилл appId=204, Лента appId=246). Azbuka (578) has none and its real bodies
+     omit the key. The ONLY source is `GET /api/grocery/retailers` →
+     `payload.categories[].retailers[].delivery.areaId`.
+   `pointId` goes in the BODY under `delivery`, never in the query — only `appId`
+   scopes the cart. And cart/set REPLACES the whole cart, so an "add" must resend the
+   existing goods merged with the new ones.
+3. **Web cart sync** (checkout.py): set `portalSID` + `sessionID` + `deviceId` as
+   cookies on .tbank.ru → links mobile cart → web checkout.
+4. GET web cart → **actual sum** (weight-based items like potatoes may differ).
+5. POST deliveries → init delivery slots.
+6. POST order/create with ACTUAL web cart sum.
+7. POST payment_gate_pay **immediately** (before auto-cancel) with
+   `amount.currencyCode=643` (RUB). Returns `{paymentId, stage:{status:"SUCCESS"}}`.
+
+> **Out-of-stock items** block order/create (code=211). Remove unavailable goods
+> before ordering. Orders auto-cancel if not paid quickly — pay immediately.
+> `grocery_order_create`, `checkout_process_order`, `payment_gate_pay` move real
+> money — review the body before calling.
+
+8. `grocery_order_cancel(order_id, app_id)` → cancel a placed order, paid or not
+   (refund goes back to the paying account). POST /api/order/cancel with ONLY
+   `orderId` in the query — no paymentId, empty body — unlike the ticket flavour
+   of the same path. The verdict is `payload.status` (`Success`/`Failed` + code,
+   605 = already cancelled); the outer `"status":"Ok"` is transport-level. Pass
+   `app_id` so the tool re-reads the order and reports the actual status.
+
+## 4. P2P transfer / bill pay  (signed)
+
+1. `transfer_sbp_resolve(phone)` → resolve a phone to its SBP recipient banks
+   (`GET /v1/get_requisites`, read-only). Returns `bankMemberId`/`maskedFIO`/
+   `pointerLinkId` per bank + `isDefaultBank`. **Required for a NEW (unsaved)
+   recipient** before commission/transfer; if several banks and no default, ask the
+   user which bank (never silently pick — wrong bank = money gone).
+2. `payment_commission(body)` → preview the fee. `payParameters` with the resolved
+   `providerFields`, `pointerType:"8276"`, `pointer:"+7…"` — plus
+   **`paymentType:"Transfer"`, which commission REQUIRES and the transfer itself must
+   NOT carry**: it appears in every captured commission body and in none of the three
+   captured `/v1/pay` bodies. Do NOT use `pointerType:"ACCOUNT"`, the bank rejects it
+   → INVALID_REQUEST_DATA.
+3. `transfer(amount, to_account, description, provider, bank_member_id, masked_fio,
+   pointer_link_id, from_account, force)` → moves REAL money. The HMAC
+   `x-api-signature` over `/v1/pay` (base64(HMAC-SHA256(key=sessionid,
+   msg=METHOD+path_tail+query+body))) is applied INSIDE `transfer`, over the query
+   too — so the device/anti-fraud block it sends is part of what gets signed.
+   `from_account` picks the debited account; omitted, it falls back to the first
+   Current RUB, which is a guess. If the member fields are omitted, the recipient is
+   AUTO-resolved (default bank, or single match; several-without-default →
+   `RECIPIENT_MULTIPLE_BANKS`). `provider="transfer-inner"` for between-own-accounts.
+   Returns `paymentId` — the only handle for `payment_receipt()`, unavailable later.
+   An unconfirmed outcome BLOCKS the next identical transfer; `force=True` retries
+   with the same `userPaymentId` so the bank sees a repeat, not a second payment.
+
+> Only the `v1/pay`/`group_pay` paths are signed; grocery payment (`payment_gate_pay`)
+> is cookie-only.
+
+### Service bills (utilities, fines, taxes, internet)
+
+4. `payment_providers()` → the 19 provider GROUPS. `payment_providers(group, query)`
+   → providers inside one (102 571 exist in total across 1026 pages, so always
+   filter; the header chains `page=N+1`). `payment_providers(provider_id, group)`
+   → that provider's payment FIELD SCHEMA: field id, human name, required flag,
+   hint and a validating `regexp`. That schema is the only source of the field
+   names — they differ per provider. The id lookup scans up to `pages=` catalogue
+   pages (default 5, 100 records each) and says so when a not-found is only a
+   search boundary — with `group` the record lands on the first page.
+
+   The group filter matches the provider's `groupId`, which does not always equal
+   the name the groups list prints: «ЖКХ» is `Коммунальные платежи` (63 889
+   providers) and «Интернет, ТВ и телефония» drops its comma. A mismatch is HTTP 200
+   with an EMPTY payload, not an error. `GROUP_ALIASES` in `src/client.py` maps the
+   two known cases.
+5. `pay_bill(provider_id, fields, amount, group, from_account)` → REAL MONEY. It
+   validates every field against the provider's `regexp` and refuses before sending,
+   then prices the payment through `payment_commission` (which is also the bank
+   validating the body) and enforces the provider's min/max. Unknown outcome blocks a
+   repeat and reuses `userPaymentId`, exactly as `transfer` does.
+
+> ⚠️ The pay ENVELOPE for bill providers is not capture-verified: the one captured
+> bill payment is on the WEB host (`www.tbank.ru/api/common/v1/pay`, with
+> `delayAccepted`/`ucid` and a browser device block), while the mobile signed
+> `/v1/pay` has only ever been captured carrying TRANSFER providers. Verified live
+> that the mobile host accepts a bill provider on the commission endpoint — it
+> resolves the provider, prices it and returns its limits. Keep the first real
+> payment to a new provider small.
+
+## 5. Messenger / support chat  (read + send)
+
+1. `messenger_unread()` → how many unread, and in which chats (by name).
+2. `messenger_conversations(archived, offset)` → one page of chats (find the
+   support chat `conversationId`, e.g. title "Поддержка"). The header names the
+   `offset` for the next page; `archived=True` lists archived chats.
+3. `messenger_messages(conversation_id, limit, offset, max_chars)` → the chat
+   history, oldest first, with author and time. The bank returns one page; the
+   arguments window it LOCALLY: `limit` (0 = the whole page), `offset` skips the
+   newest and walks older, `max_chars` caps one message's text (0 = whole text —
+   use it to read a long bank message in full; a cut is always marked and names
+   the full length).
+4. `messenger_send(conversation_id, text)` → **send** a reply. Real message to a
+   real support agent — not money, but not undoable either; say what you are
+   about to send before sending it.
+
+> `messenger_hints`, `messenger_faq` and `messenger_mark_read` exist on the client
+> but are NOT exposed as tools — quick replies and FAQ add nothing an agent cannot
+> write itself, and marking a chat read is a side effect the user did not ask for.
+
+> Messenger needs a `tmsgSessionID` (JWT, ~1h), auto-minted via `issueTokenBySSO`
+> from the silent-relogin access_token. No OTP — works as long as the long-lived
+> `SSO_SESSION` cookie is obtained via login.
+
+## 6. Invest browse
+
+1. `invest_accounts()` → InvestBox/brokerage accounts (take `brokerAccountId`).
+2. `invest_portfolio(broker_account_id, days)` → portfolio statistics.
+3. `invest_operations(broker_account_id, operation_type, limit)` → broker ops.
+   When the bank holds more than `limit`, the header says so — raise `limit`
+   (there is no cursor: its wire name is in no capture).
+4. `invest_securities(broker_account_id)` → purchased stocks/bonds/ETF.
+
+Extras have no tool of their own — reach them through `get_data(section)`:
+`invest_offers`, `invest_yield`, `broker_margin`, `pension`.
+
+## 7. Credit / debt
+
+There are no dedicated tools here. Every one of these is a `get_data(section)`
+call returning raw JSON:
+
+1. `get_data("loans")` → active credits.
+2. `get_data("credit_schedule")` → payment schedule.
+3. `get_data("credit_rating")` / `get_data("credit_recommendations")` → rating + advice.
+4. `get_data("full_debt_amount")` / `get_data("account_details")` → debt + account detail.
+5. `get_data("statements")` / `get_data("statement_exist")` → statements.
+
+## 8. Cards, account details, identity documents
+
+> **Session LEVEL matters here.** These endpoints validate the mobile *sessionid*,
+> not just the Bearer token, and refuse an ANONYMOUS-level session. The CLIENT
+> window is only ~11 minutes (`/v1/ping` → `portalSessionExpiresInSeconds` ≈ 659)
+> while `ensure_fresh` tracks the ~2h access_token — so between re-mints the
+> session lapses and only these few tools notice. They call
+> `ensure_client_session()`, which pings and re-mints when the window has closed.
+> Both grants (refresh_token and authorization_code) mint an equally privileged
+> session — the grant type is NOT the variable, the window is.
+
+1. `list_cards()` → every card with **both** ids. `id` is what an operation's
+   `card` field holds; `ucid` is what limits/credentials key off. Do not swap them.
+2. `card_limits(ucid)` → monthly purchase + daily cash limits, and what is used up.
+3. `card_requisites(ucid)` → holder, expiry, PAN. Masked by default; `reveal=True`
+   returns the full number and CVV.
+4. `card_operations(card_id, days)` → operations on ONE card. The API has no
+   include-by-card filter (only `excludeCardIds`), so this filters client-side.
+5. `account_requisites(account_id)` → recipient/account/BIC/corr/INN for inbound
+   transfers. `currencies="RUB,USD"` returns one block per currency.
+6. `documents(kind)` → passport, international passport, driver's licence, SNILS,
+   INN, OSAGO/KASKO, PTS/STS. The store also holds RELATIVES' documents the client
+   once entered; they are filtered out by birthDate unless `include_others=True`.
+
+## 9. Orders across every vertical
+
+`orders(kind)` is one call over `/api/orders/list` and covers groceries, cinema,
+concerts, flights, trains and hotels together (188 orders back to 2018).
+`kind` = "афиша" | "кино" | "путешествия" | "продукты" or a raw `objectType`.
+`order_details(order_id)` adds hall/seats/booking code for entertainment orders;
+groceries have their own `grocery_order_status`.
+
+Travel is split by vertical, because each one authorizes differently:
+- **Hotels** — `travel_order_details(order_id)` works: `hotels.t-bank-app.ru`
+  accepts the plain Bearer, and returns dates, city, hotel, room, guests, price.
+- **Flights and trains** are BLOCKED, and not by a request-shape bug. Both need a
+  separate link-token minted outside this host — trains via
+  `tsocial.tinkoff.ru/.../game/link-token` (answers `B002D965`), flights via
+  `/v1/travel_link_auth_token` (answers `INSUFFICIENT_PRIVILEGES`, even on a
+  CLIENT-level session). `travel_order_details` says so instead of retrying;
+  the summary from `orders()` is all there is.
+
+## 10. Grocery nutrition / lowest-calorie shopping
+
+1. `grocery_search(query, app_id, point_id)` → candidate goods.
+2. `grocery_good_info(good_id, …)` → ingredients, storage, and КБЖУ per 100 g and
+   per package. Nutrition comes in two shapes: some retailers fill the structured
+   protein/fat/carb/energy fields, ВкусВилл leaves them empty and publishes only
+   free text ("белки 3,3 г, жиры 3 г, углеводы 18,4 г; 113,8 ккал") — both parsed.
+3. `grocery_rank(query, …, sort_by, order)` → the same search, ranked. `sort_by` ∈
+   `price | weight | kcal | kcal_pack | protein | fat | carb`; empty = the store's
+   own order. Nutrition keys auto-load the КБЖУ (one extra request per candidate),
+   so pass them only when the user asked for a nutritional criterion.
+   Goods whose nutrition the retailer does not publish sort LAST in BOTH
+   directions — "not published" is not zero, and must never win a "most calories"
+   query. The MCP ranks; WHICH ranking to use for a given phrase lives in the
+   grocery skill, and applies only on an explicit request.
+
+## 11. Tickets — cinema and concerts  (REAL money at step 5)
+
+Full detail, including the confirmation wording, lives in the `tbank-tickets`
+skill. The order here is the part you must not improvise:
+
+1. `cinema_search(query, city)` → `eventId` (city-independent). For concerts,
+   theatre and exhibitions use `search_app(query, screen="afisha")` instead.
+2. `cinema_schedule(event_id, date, cinema="каро 11", around="17:00", city)` →
+   showtimes per venue, filtered by venue-name substring and a time window
+   (`window_min`). Pass the SAME `city` as in step 1 — it also anchors the
+   distance sort, and a Petersburg schedule ordered from the centre of Moscow
+   looks plausible and is nonsense. Default is Москва, silently.
+   Concerts: `concert_schedule(event_id)` — their showings are not date-keyed.
+   Take **both** `slotId` and `objectId`; a `slotId` without its venue is useless.
+3. `cinema_seats(event_id, slot_id, object_id, row, max_price, kind)` → free seats
+   with prices. Empty for a concert usually means free seating — `concert_hall(…)`
+   shows those sectors, but they are **read-only**: the capture has no
+   order/create example for that screen, so the MCP will not invent one.
+4. `cinema_book(…, seats="7:10,7:11")` → creates the order, moves NO money.
+   Returns `orderId` and `nfsPaymentToken`. **The token is returned here and
+   nowhere else** — `order_details()` does not carry it. Lose it and the booking
+   can never be paid, only re-made.
+5. `ticket_pay(order_id, amount, nfs_payment_token, account_id)` → **REAL money.**
+   Only after the user confirms a concrete sum and concrete seats. The tool
+   re-reads the order from the backend and refuses to pay a mismatched amount.
+6. `order_details(order_id)` → booking code, hall, seats.
+
+7. `ticket_cancel(order_id, kind, payment_id)` → cancels. `paymentId` goes in the
+   query **next to** `orderId` and is resolved from `orders()` when the caller
+   omits it. With it missing the host still answers `200 {"status":"Success"}`
+   while the order stays active and nothing is refunded — a success message is
+   not evidence of a cancellation. A paid order settles as
+   **PARTIALLY_CANCELED**: tickets refunded, service fee kept.
+
+> On error the order status is UNKNOWN, not "still booked" — check
+> `orders("афиша")` and the refund in `list_operations()` before doing anything
+> else, and never retry blind. (The earlier 500s in `captures.xml` read as a
+> broken endpoint; the path works, it was the missing `paymentId`.)
+
+## 12. Global search across the app
+
+`search_app(query, screen, limit)` — one full-text search over whatever the given
+screen indexes. `screen` is a strict enum and a wrong value is a 400, not an empty
+result: `services` (banking + everything), `afisha` (cinema/concert/theatre/
+exhibition), `movie_main` (films only), `grocery`. Hits come back grouped by
+`objectType` with their ids; for films the id IS the `eventId` that
+`cinema_schedule` wants, so search → schedule needs no translation step.
+
+## Notes
+
+- Every tool returns a short string (counts + summaries) or JSON; its own
+  docstring is the reference — they are the interface the MCP actually exposes.
+- On `SESSION EXPIRED`, call `refresh_session` (refresh_token → silent re-login,
+  no OTP) and retry. If it returns `REAUTH_REQUIRED`, the user must re-login
+  (login + OTP + password).
+- `grocery_checkout` contract is verified against captures.xml: agreement from
+  `user/payment/account/last`, clientEmail from `get-customer-information`,
+  post-delivery sum from deliveries `payload.cartPrice`, and no blind sleep (it polls
+  the cart API until it answers). Every in-page request is bounded by an
+  AbortController — `page.evaluate` has no timeout of its own, and a hung fetch
+  between order/create and payment is the one place that must never stall.
+  If the payment answer is lost, the order is read back once before the result is
+  called unknown: a lost response is not an unpaid order. After a genuinely UNKNOWN
+  result the auto-retry is BLOCKED — reconcile via `grocery_attempts` +
+  `grocery_order_status(order_id)`, and force only after the user confirms no order
+  exists.
+- Diagnostics: checkout stages (delivery/order/payment) and session refresh emit
+  redacted structured events to `~/.local/share/tbank-mcp/events.jsonl` (no
+  secrets/PII). Call `diagnostics()` to reconstruct an attempt and find the last
+  confirmed step.
+- Money tools (`transfer`, `grocery_checkout`, `ticket_pay`) are REAL — confirm the
+  amount/recipient (transfer), store+sum (grocery_checkout) or sum+seats
+  (ticket_pay) with the user before running. A request to buy something is not a
+  confirmation to pay for it; the confirmation is an answer to a concrete sum.

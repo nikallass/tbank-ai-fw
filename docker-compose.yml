@@ -1,0 +1,18 @@
+services:
+  firewall:
+    build: ./firewall
+    container_name: tbank-firewall
+    # 127.0.0.1 намеренно: аутентификации пока нет, и до неё сервис не должен
+    # быть доступен ниоткуда, кроме этой машины. Смена на 0.0.0.0 без входа —
+    # это открытая наружу панель, которая подтверждает переводы одной кнопкой.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - firewall-data:/data
+    environment:
+      TZ: Europe/Moscow
+      TBANK_FW_DB: /data/firewall.db
+    restart: unless-stopped
+
+volumes:
+  firewall-data:

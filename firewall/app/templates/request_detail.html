@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block content %}
+<p class="muted" style="margin:0 0 6px"><a href="/requests">← к журналу</a></p>
+<h1>{{ catalog.title_of(row.tool) }}</h1>
+<p class="sub mono">{{ row.id }}</p>
+
+<div class="card">
+  <dl class="kv">
+    <dt>Решение</dt><dd><span class="tag {{ row.decision }}">{{ {'allow':'разрешено','deny':'заблокировано','hitl':'подтверждение'}[row.decision] }}</span>
+      <span class="tag {{ row.kind }}">{{ catalog.KIND_TITLES.get(row.kind, row.kind) }}</span></dd>
+    <dt>Причина</dt><dd>{{ row.reason or "—" }}</dd>
+    <dt>Правило</dt><dd>{{ row.rule_name or "—" }}</dd>
+    <dt>Статус</dt><dd>{{ row.status }}{% if row.result_status %} · результат: {{ row.result_status }}{% endif %}</dd>
+    <dt>Тул</dt><dd class="mono">{{ row.tool }}</dd>
+    <dt>Категория</dt><dd>{{ catalog.CATEGORIES.get(row.category, row.category) }}</dd>
+    {% if row.amount %}<dt>Сумма</dt><dd><b>{{ "%.2f"|format(row.amount) }} ₽</b></dd>{% endif %}
+    {% if row.recipient %}<dt>Получатель</dt><dd class="mono">{{ row.recipient }}</dd>{% endif %}
+    {% if row.from_account %}<dt>Счёт списания</dt><dd class="mono">{{ row.from_account }}</dd>{% endif %}
+    {% if row.org %}<dt>Организация / заказ</dt><dd class="mono">{{ row.org }}</dd>{% endif %}
+    <dt>Агент</dt><dd>{{ row.agent or "—" }}{% if row.session %} · сессия {{ row.session }}{% endif %}</dd>
+    {% if row.ms %}<dt>Длительность</dt><dd>{{ row.ms }} мс</dd>{% endif %}
+  </dl>
+</div>
+
+{% if hitl %}
+<div class="card">
+  <h2>Подтверждение</h2>
+  <dl class="kv">
+    <dt>Состояние</dt><dd>{{ hitl.state }}</dd>
+    <dt>Режим</dt><dd>{{ hitl.mode }}</dd>
+    {% if hitl.note %}<dt>Комментарий</dt><dd>{{ hitl.note }}</dd>{% endif %}
+  </dl>
+  {% if hitl.state == 'pending' %}<p><a class="btn" href="/hitl/{{ row.id }}">Открыть и решить</a></p>{% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Аргументы вызова</h2>
+  <pre class="code">{{ args_pretty }}</pre>
+</div>
+
+<div class="card">
+  <h2>Факты, по которым сработали правила</h2>
+  <pre class="code">{{ facets_pretty }}</pre>
+</div>
+
+{% if row.output_head %}
+<div class="card">
+  <h2>Что агент получил в ответ (первая строка)</h2>
+  <pre class="code">{{ row.output_head }}</pre>
+</div>
+{% endif %}
+{% endblock %}

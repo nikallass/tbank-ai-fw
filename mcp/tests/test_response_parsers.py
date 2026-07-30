@@ -1,0 +1,602 @@
+"""The server-side parsers that turn a bank payload into what the agent reads.
+
+Two past fixes lived here and neither was pinned:
+
+  45d50fb  grocery_order_status reported EVERY order as unpaid with an unknown sum.
+           It read order.paymentInfo.paid and a top-level order.sum; neither exists.
+           The real schema is order.{id,status,paymentId,cart{sum,goodsSum}} — and
+           CREATED_DYNAMIC is the normal status of a placed order, not a failure.
+  8a9f90f  messenger listings cut the conversationId to 24 chars with an ellipsis,
+           so the id could not be passed to messenger_messages; bot chats showed as
+           "?" because their name lives on the member, not on a title.
+
+A parser that misreads a field does not crash — it produces a confident wrong
+answer, which is why these need tests rather than eyeballing.
+
+    python3 tests/test_response_parsers.py
+"""
+import os
+import re
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src import server  # noqa: E402
+from src.client import MobileSession  # noqa: E402
+
+failures = []
+
+
+def check(cond, msg):
+    if not cond:
+        failures.append(msg)
+
+
+class Stub(MobileSession):
+    """Answers the named methods with canned payloads.
+
+    Methods are bound explicitly rather than through __getattr__: that catches every
+    missing attribute, so a dataclass field the tool happens to touch turns into an
+    AttributeError the tool swallows into an error string — the test then "fails" for
+    a reason that has nothing to do with the parser."""
+
+    def __init__(self, **answers):
+        self.mobile_sessionid = "sid"
+        self.access_token = "tok"
+        self._memo = {}
+        for name, value in answers.items():
+            setattr(self, name, (lambda v: (lambda *a, **kw: v))(value))
+
+    def ensure_fresh(self, *a, **kw):
+        return None
+
+
+def run(tool, session, *args, **kw):
+    saved = server._require
+    server._require = lambda: session
+    try:
+        return tool(*args, **kw)
+    finally:
+        server._require = saved
+
+
+# The shape of a genuinely placed and paid order (capture item 691).
+PAID_ORDER = {"payload": {"order": {
+    "id": "70123456", "status": "CREATED_DYNAMIC", "paymentId": "100000000001",
+    "application": {"id": "204", "name": "ВкусВилл"},
+    "cart": {"sum": 1600.2, "goodsSum": 1630.0, "goods": [{"id": "1"}]},
+}}}
+
+
+def test_a_paid_order_does_not_read_as_unpaid():
+    out = run(server.grocery_order_status, Stub(grocery_order_get=PAID_ORDER), "70123456")
+    check("paid=yes" in out, f"an order with a paymentId must read as paid: {out}")
+    check("sum=1600.2" in out, f"the sum must come from cart.sum: {out}")
+    check("CREATED_DYNAMIC" in out,
+          f"the real status must be shown, not translated into a failure: {out}")
+    check("ВкусВилл" in out, f"the store must be named: {out}")
+    check("100000000001" in out, f"the paymentId must be shown for reconciliation: {out}")
+
+    # No paymentId → honestly unpaid, and the sum still resolves.
+    unpaid = {"payload": {"order": {"id": "70123457", "status": "NEW",
+                                    "cart": {"goodsSum": 500.0}}}}
+    out2 = run(server.grocery_order_status, Stub(grocery_order_get=unpaid), "70123457")
+    check("paid=no" in out2, f"an order without a paymentId is unpaid: {out2}")
+    check("sum=500.0" in out2, f"goodsSum must be the fallback: {out2}")
+
+    # An empty/odd payload must degrade, not raise.
+    for junk in ({}, {"payload": None}, {"payload": {"order": "nope"}}):
+        got = run(server.grocery_order_status, Stub(grocery_order_get=junk), "x")
+        check("Traceback" not in got and got.strip(),
+              f"a malformed order payload must degrade gracefully: {got!r}")
+    print("  grocery_order_status: paid/unpaid, sum and status read from the real schema")
+
+
+def test_conversation_ids_survive_intact():
+    long_id = "c" * 64
+    convs = [
+        {"conversationId": long_id, "title": "Поддержка",
+         "unreadMessagesCount": 2, "updatedAt": "2026-07-25T10:00:00Z",
+         "message": {"content": {"text": "Здравствуйте!   Чем помочь?"}}},
+        {"conversationId": "bot-1", "members": [{"name": "Бот доставки"}],
+         "botInfo": {"login": "delivery_bot"}, "updatedAt": "2026-07-25T09:00:00Z"},
+    ]
+    out = run(server.messenger_conversations, Stub(messenger_conversations=convs))
+    check(long_id in out,
+          "the conversationId was truncated — it is the argument to messenger_messages")
+    # Written as `… if "id=" in out else True`, this could not fail: rename the label
+    # and the assertion evaluates to True having checked nothing — the one shape a
+    # test must never have. Assert the ids are THERE, then that they are intact.
+    ids = re.findall(r"id=(\S+)", out)
+    check(len(ids) == 2, f"every chat must be printed with its id, got {ids}")
+    check(all("…" not in i and "..." not in i for i in ids),
+          f"an id was elided — it cannot be passed to messenger_messages: {ids}")
+    check(ids[:1] == [long_id],
+          f"the id must be the conversationId verbatim: {ids[:1]}")
+    check("Поддержка" in out, f"the chat title must be shown: {out}")
+    check("Бот доставки" in out,
+          f"a bot chat has no title — its name comes from the member: {out}")
+    check("непрочитано: 2" in out, f"the unread count must be surfaced: {out}")
+
+    empty = run(server.messenger_conversations, Stub(messenger_conversations=[]))
+    check("Чатов нет" in empty, f"an empty list must say so, not return '': {empty!r}")
+    print("  messenger_conversations: full ids, bot names, unread counts, honest empty")
+
+
+def test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat():
+    """The messenger answers an expired token with HTTP 200 and an error object in
+    the BODY — a LIST, so it flowed through as if it were the conversations and the
+    tool printed «- ? | id= |»: one chat with no id, no name and nothing to retry.
+
+    Found by calling every read tool against the live API twice, 25 minutes apart:
+    the second run returned that row. _tmsg_expired() only decodes the token's own
+    `exp`, so a token the SERVER retired early still looks valid locally and no
+    re-mint is attempted."""
+    DEAD = [{"errorId": "99c4bb", "errorCode": "AUTH_REQUIRED",
+             "errorMessage": "Token inactive"}]
+    ALIVE = [{"conversationId": "c-1", "title": "Поддержка",
+              "updatedAt": "2026-07-25T10:00:00Z"}]
+
+    class Tmsg(Stub):
+        def __init__(self, answers):
+            super().__init__()
+            self.answers = list(answers)
+            self.tmsg_session_id = "jwt.header.payload"
+            self.remints = 0
+
+        def _ensure_tmsg(self):
+            self.remints += 1
+            self.tmsg_session_id = "fresh"
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            return self.answers.pop(0) if self.answers else ALIVE
+
+    s = Tmsg([DEAD, ALIVE])
+    out = run(server.messenger_conversations, s)
+    check("Поддержка" in out,
+          f"the retry after a re-mint must return the real chats: {out!r}")
+    check("id= " not in out and "- ? " not in out,
+          f"an error envelope was rendered as a conversation: {out!r}")
+    check(s.remints == 1, f"exactly one re-mint expected, got {s.remints}")
+    check(s.tmsg_session_id == "fresh", "the dead token was not replaced")
+
+    # Still dead after re-minting → say so, actionably. Never a fake chat.
+    s2 = Tmsg([DEAD, DEAD])
+    out2 = run(server.messenger_conversations, s2)
+    check("SESSION EXPIRED" in out2 or "refresh_session" in out2,
+          f"a token that stays dead must point at the recovery tool: {out2!r}")
+    check("Token inactive" in out2, f"the bank's reason must survive: {out2!r}")
+    print("  messenger: a retired token is re-minted once, never shown as a chat")
+
+
+def test_documents_merge_and_lists():
+    """Three losses documents() used to make silently: list-valued entered fields
+    (licence categories, OSAGO drivers) were dropped by the dict-only flattener;
+    duplicate copies kept only the field-richest one, losing fields unique to the
+    poorer copy; and `name` was always hidden although for an unknown code it is
+    the only human-readable label."""
+    wrap = lambda v: {"isEntered": True, "value": v}          # noqa: E731
+    docs = {
+        "RusDriversLic": [
+            {"value": {"serial": wrap("77"), "number": wrap("123"),
+                       "categories": wrap(["B", "B1", "M"]),
+                       "person": {"birthDate": wrap("1990-01-01")}}},
+            # Same licence from another source: fewer fields, one unique.
+            {"value": {"serial": wrap("77"), "number": wrap("123"),
+                       "issueDate": wrap("2020-05-01"),
+                       "person": {"birthDate": wrap("1990-01-01")}}},
+        ],
+        "SomeNewCode": [
+            {"value": {"number": wrap("42"), "name": wrap("Карта болельщика")}},
+        ],
+    }
+
+    class DocStub(Stub):
+        def ensure_client_session(self, *a, **kw):
+            return None
+
+    out = run(server.documents, DocStub(
+        identity_documents=docs,
+        identity_brief={"birthDate": {"value": "1990-01-01"}}))
+    check("B, B1, M" in out,
+          f"an entered list field must survive the flattener: {out!r}")
+    check("issueDate = 2020-05-01" in out,
+          f"a field unique to the poorer duplicate must survive the merge: {out!r}")
+    check(out.count("Водительское удостоверение:") == 1,
+          f"duplicates must merge into one document, not two: {out!r}")
+    check("Карта болельщика" in out,
+          f"name must print when the title is a raw code: {out!r}")
+    print("  documents: list fields kept, duplicates merged, unknown codes keep their name")
+
+
+def test_grocery_search_header_is_honest():
+    """The tool header must separate three different numbers: shown, matched, and
+    what the store returned at all — «10 товаров» that silently came out of 25
+    matches is how the old output read as complete."""
+    rows = [{"id": str(i), "name": f"Йогурт {i}", "price": 50 + i, "weight": "",
+             "likely_raw": True} for i in range(10)]
+    out = run(server.grocery_search, Stub(grocery_search=(rows, 25, 30)),
+              "йогурт", "204", "5980")
+    head = out.splitlines()[0]
+    check("показано 10 из 25" in head and "вернула 30" in head,
+          f"the header must say shown/matched/fetched: {head!r}")
+    check("limit=0" in head, f"the header must say how to see the rest: {head!r}")
+    empty = run(server.grocery_search, Stub(grocery_search=([], 0, 0)),
+                "йогурт", "204", "5980")
+    check("Не нашёл" in empty, f"an empty search must stay honest: {empty!r}")
+    print("  grocery_search: the header separates shown / matched / fetched")
+
+
+def test_messenger_paging_arguments_reach_the_client():
+    """messenger_conversations(offset=, archived=) must reach the wire as the same
+    query params the app sends on every call today (offset / use_is_archived), and
+    messenger_messages must stay the app's exact request — no invented params."""
+    seen = []
+
+    class Wire(MobileSession):
+        def __init__(self):
+            self.tmsg_session_id = "tok"
+            self._memo = {}
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            seen.append((path_override, dict(overrides or {})))
+            return []
+
+    w = Wire()
+    w.messenger_conversations(archived=True, offset=30)
+    path, ov = seen[-1]
+    check(path.endswith("/conversations/mobile"),
+          f"the chat list must keep its capture path: {path!r}")
+    check(ov.get("offset") == "30", f"offset must ride the request: {ov}")
+    check(ov.get("use_is_archived") == "true",
+          f"archived must ride as use_is_archived: {ov}")
+
+    w.messenger_messages("c-9")
+    path2, ov2 = seen[-1]
+    check(path2.endswith("/conversations/c-9/messages"),
+          f"the history must keep its capture path: {path2!r}")
+    check(ov2.get("direction") == "before" and "messageId" not in ov2,
+          f"history is paged locally — no unconfirmed params on the wire: {ov2}")
+    print("  messenger paging: offset/use_is_archived reach the wire, nothing invented")
+
+
+def test_the_cart_prints_the_ids_it_must_be_edited_by():
+    """grocery_set_cart addresses goods BY ID and replaces the whole cart, and
+    grocery_cart is the only tool that says what is in it. Printing names alone left
+    the agent able to read the cart and unable to change one line of it — the id had
+    to be guessed, and a wrong guess drops the real item."""
+    goods = [
+        {"id": "382032", "name": "Сыр Бри с белой плесенью выдержанный 60% Франция",
+         "price": {"value": 538.0}, "count": 1.0},
+        {"id": "606", "name": "Помидоры розовые", "price": {"value": 214.0},
+         "count": 0.57},
+    ]
+    out = run(server.grocery_cart, Stub(grocery_cart_get={"cart": {"goods": goods}}),
+              "578", "2")
+
+    printed = set(re.findall(r"id=(\S+)", out))
+    check(printed == {"382032", "606"},
+          f"the cart must print exactly the ids it holds, printed {printed}")
+    # The name is truncated for width; the id must not be caught up in that.
+    check("Сыр Бри" in out, f"the name must still be shown: {out}")
+    # A weight-priced good keeps its fractional count — rounding it to 1 (or to 0,
+    # which means removal) is what a re-send built from this listing would carry.
+    check("0.57" in out, f"a fractional count must survive the listing: {out}")
+
+    empty = run(server.grocery_cart, Stub(grocery_cart_get={"cart": {"goods": []}}),
+                "578", "2")
+    check("Корзина пуста" in empty, f"an empty cart must say so: {empty!r}")
+    print("  grocery_cart: every good is printed with the id grocery_set_cart needs")
+
+
+def test_delivery_speed_is_read_from_both_slot_shapes():
+    """`nearestTime` comes in two shapes and they are not interchangeable — in the
+    capture 55 of 80 retailers use one and 25 the other:
+
+      Relative — from/to are MINUTES as strings ("Самокат: to=15").
+      Absolute — from/to are ISO-8601 TIMESTAMPS ("METRO: tomorrow 08:00–11:00").
+
+    The old code formatted both as f"{from}-{to} min", which turned the majority
+    shape into "2026-07-22T08:00:00+03:00-2026-07-22T11:00:00+03:00 min". Nothing
+    caught it because grocery_stores() never printed the field at all."""
+    import datetime as dt
+    from src.client import delivery_eta
+
+    tz = dt.timezone(dt.timedelta(hours=3))
+    now = dt.datetime(2026, 7, 22, 7, 0, tzinfo=tz)
+
+    eta, label = delivery_eta({"type": "Relative", "from": "", "to": "15"}, now)
+    check(eta == 15.0, f"a relative slot must give its minutes, got {eta!r}")
+    check(label == "до 15 мин", f"unexpected label: {label!r}")
+
+    eta, label = delivery_eta({"type": "Relative", "from": "20", "to": "35"}, now)
+    check(eta == 35.0, f"a range must be measured to its END, got {eta!r}")
+    check(label == "20–35 мин", f"unexpected label: {label!r}")
+
+    # The shape that used to be printed as an ISO range labelled "min".
+    eta, label = delivery_eta({"type": "Absolute",
+                               "from": "2026-07-22T08:00:00+03:00",
+                               "to": "2026-07-22T11:00:00+03:00"}, now)
+    check(eta == 240.0, f"an absolute slot must convert to minutes, got {eta!r}")
+    check(label == "сегодня 08:00–11:00", f"unexpected label: {label!r}")
+    check("T" not in label and "+03:00" not in label,
+          f"a raw timestamp leaked into the label: {label!r}")
+    check("мин" not in label,
+          f"an absolute slot must NOT be labelled in minutes: {label!r}")
+
+    eta, label = delivery_eta({"type": "Absolute",
+                               "from": "2026-07-23T13:00:00+03:00",
+                               "to": "2026-07-23T16:00:00+03:00"}, now)
+    check(eta == 1980.0 and label == "завтра 13:00–16:00",
+          f"next-day slot: {eta!r} {label!r}")
+
+    # Unknown, malformed and already-passed windows are all "no idea", never 0.
+    for junk, why in ((None, "no delivery block"), ({}, "empty block"),
+                      ({"type": "Relative", "from": "", "to": ""}, "no upper bound"),
+                      ({"type": "Absolute", "from": "", "to": "не дата"}, "garbage date"),
+                      ({"type": "Absolute", "from": "2026-07-21T09:00:00+03:00",
+                        "to": "2026-07-21T09:30:00+03:00"}, "window already passed")):
+        eta, _ = delivery_eta(junk, now)
+        check(eta is None, f"{why}: expected None, got {eta!r} — it would win «fastest»")
+    print("  delivery_eta: relative minutes and absolute slots, unknown stays unknown")
+
+
+def test_the_store_list_shows_and_sorts_by_delivery_speed():
+    """«Самая быстрая доставка» needs the tool to return the time at all — it did
+    not: the client parsed nearestTime and grocery_stores() printed only name, ids,
+    minSum and cashback."""
+    stores = [
+        {"appId": "578", "name": "Азбука Вкуса", "pointId": "2", "minOrderSum": 500.0,
+         "etaMin": 110.0, "deliveryWindow": "до 110 мин", "deliveryPrice": 0.0,
+         "cashback": 5},
+        {"appId": "590", "name": "Самокат", "pointId": "b7", "minOrderSum": 0.0,
+         "etaMin": 15.0, "deliveryWindow": "до 15 мин", "deliveryPrice": 0.0,
+         "cashback": 3},
+        {"appId": "246", "name": "METRO", "pointId": "0503", "minOrderSum": 2000.0,
+         "etaMin": 1980.0, "deliveryWindow": "завтра 08:00–11:00",
+         "deliveryPrice": 170.0, "cashback": 7},
+        {"appId": "11", "name": "Без слота", "pointId": "x", "minOrderSum": 0.0,
+         "etaMin": None, "deliveryWindow": "", "deliveryPrice": 0.0, "cashback": 0},
+    ]
+    names = lambda out: [ln.split()[1] for ln in out.splitlines() if ln.startswith("- ")]
+
+    plain = run(server.grocery_stores, Stub(grocery_stores=stores))
+    check("до 15 мин" in plain and "завтра 08:00–11:00" in plain,
+          f"the delivery window must be printed at all: {plain}")
+    check("170.00 ₽" in plain, f"the delivery price must be printed: {plain}")
+    check("срок не указан" in plain,
+          f"a store with no slot must say so, not show a blank: {plain}")
+    check(names(plain) == ["Азбука", "Самокат", "METRO", "Без"],
+          f"without sort_by the bank's order must survive: {names(plain)}")
+
+    fast = run(server.grocery_stores, Stub(grocery_stores=stores), "speed")
+    check(names(fast) == ["Самокат", "Азбука", "METRO", "Без"],
+          f"«fastest» must sort by the end of the window: {names(fast)}")
+
+    # Unknown stays last in BOTH directions — «no slot» is not «instant».
+    slow = run(server.grocery_stores, Stub(grocery_stores=stores), "speed", "desc")
+    check(names(slow)[-1] == "Без",
+          f"a store with no slot must stay last under desc too: {names(slow)}")
+
+    cheap = run(server.grocery_stores, Stub(grocery_stores=stores), "price")
+    check(names(cheap)[-1] == "METRO", f"price sort: {names(cheap)}")
+    small = run(server.grocery_stores, Stub(grocery_stores=stores), "min_sum")
+    check(names(small)[-1] == "METRO", f"min_sum sort: {names(small)}")
+
+    bad = run(server.grocery_stores, Stub(grocery_stores=stores), "быстро")
+    check("speed" in bad and "min_sum" in bad,
+          f"an unknown sort key must list the real ones: {bad!r}")
+    print("  grocery_stores: window and price shown, speed/price/min_sum sortable")
+
+
+def test_the_invest_envelopes_are_unwrapped():
+    """One bug in four places, found by calling every read tool against the live API.
+
+    _as_list understands `list` and `payload`. These three endpoints answer with
+    their own key — {"accounts": …}, {"items": …}, {"portfolios": …} — so it returned
+    the ENVELOPE as a single element and every tool rendered one useless row:
+    «- ? | », «- [] ? | ». Nothing raised and nothing was empty, so it looked like an
+    account with no data rather than a parser that missed.
+
+    The one that mattered is invest_accounts: brokerAccountId is the only argument
+    the other three take, so its bad row made the whole investment side unreachable —
+    while get_data("invest_accounts") had been returning the same payload all along."""
+    accounts = {"accounts": [
+        {"brokerAccountId": "2000000001", "brokerAccountType": "InvestBox",
+         "brokerAccountStatus": "NORM",
+         "totalBalance": {"currency": "RUB", "value": 4459.28},
+         "authBalance": {"currency": "RUB", "value": 1178.4},
+         "totalYield": {"currency": "RUB", "value": 1.48}},
+        {"brokerAccountId": "2000000002", "brokerAccountType": "Fdr",
+         "brokerAccountStatus": "NORM", "isBlocked": True,
+         "totalBalance": {"currency": "RUB", "value": 7000000.00}}]}
+
+    class InvestStub(Stub):
+        def ensure_client_session(self, *a, **kw):
+            return None
+
+        def _call_read(self, key, *, overrides=None, body=None, path_override=None):
+            return {"investbox_accounts": accounts,
+                    "ca_operations": {"hasNext": True, "nextCursor": "1", "items": [
+                        {"date": "2026-07-21T17:34:51+03:00", "type": "payOut",
+                         "description": "Вывод со счета", "status": "executed",
+                         "payment": {"currency": "RUB", "value": -150000}}]},
+                    "purchased_securities": {"totals": {}, "portfolios": [
+                        {"brokerAccount": {"brokerAccountId": "2000000003",
+                                           "name": "Рублевый"},
+                         "positions": [{"ticker": "AMD", "securityType": "stock",
+                                        "currentBalance": 28, "portfolioPercent": 7.65,
+                                        "prices": {"currentPrice": {"value": 521.51,
+                                                                    "currency": "USD"}},
+                                        "yields": {"yield": {"absolute": {
+                                            "value": 1200.0, "currency": "RUB"}}}}]}]},
+                    }[key]
+
+    out = run(server.invest_accounts, InvestStub())
+    check(out.count("\n") == 1, f"both accounts must be listed: {out!r}")
+    check("2000000001" in out and "2000000002" in out,
+          f"the brokerAccountId is the only key to the rest of the vertical: {out!r}")
+    check("?" not in out.split("|")[0], f"the id must resolve, not print «?»: {out!r}")
+    check("4 459.28 RUB" in out, f"the balance must be shown: {out!r}")
+    check("ЗАБЛОКИРОВАН" in out, f"a blocked account must say so: {out!r}")
+
+    ops = run(server.invest_operations, InvestStub(), "2000000001", "", 10)
+    check("-150 000.00 RUB" in ops,
+          f"the amount lives under `payment`, not `amount`: {ops!r}")
+    check("Вывод со счета" in ops and "payOut" in ops, f"operation detail: {ops!r}")
+    check("[]" not in ops, f"the envelope leaked into the row: {ops!r}")
+
+    secs = run(server.invest_securities, InvestStub())
+    check("AMD" in secs and "28 шт" in secs, f"positions must be listed: {secs!r}")
+    check("521.51 USD" in secs, f"the price must keep its currency: {secs!r}")
+    check("2000000003" in secs,
+          f"the PORTFOLIO id differs from the account id and must be shown: {secs!r}")
+
+    # Filtering by an account id that names no portfolio must say why, not answer
+    # "no securities" — the ids are from different namespaces.
+    none = run(server.invest_securities, InvestStub(), "2000000001")
+    check("без аргумента" in none,
+          f"an empty filter result must explain the id mismatch: {none!r}")
+    print("  invest: accounts, operations and positions unwrapped from their envelopes")
+
+
+def test_money_formatting_is_unambiguous():
+    """A bare float used to fall through to str(), so every caller holding a plain
+    number printed «1000.0» — no separator, no currency, easy to misread."""
+    check(server._money(1600.2, "RUB") == "1 600.20 RUB",
+          f"a bare number + currency must render fully: {server._money(1600.2, 'RUB')!r}")
+    check(server._money({"value": 1600.2, "currency": {"name": "RUB"}}) == "1 600.20 RUB",
+          f"the bank's dict shape must render the same: "
+          f"{server._money({'value': 1600.2, 'currency': {'name': 'RUB'}})!r}")
+    check(server._money(1234567.5, "RUB").startswith("1 234 567"),
+          f"thousands must be grouped: {server._money(1234567.5, 'RUB')!r}")
+
+    # Absent is not zero — an empty balance must not read as «0.00».
+    for empty in (None, ""):
+        check(server._money(empty) == "—",
+              f"_money({empty!r}) must say 'unknown', got {server._money(empty)!r}")
+    check(server._money(0, "RUB") == "0.00 RUB",
+          f"a real zero must still print as zero: {server._money(0, 'RUB')!r}")
+
+    # Nothing may raise, whatever it is handed.
+    for value in (0, 0.0, "", None, "abc", {"value": 10}, {"value": None}, []):
+        got = server._money(value)
+        check(isinstance(got, str), f"_money({value!r}) returned {type(got).__name__}")
+    print("  _money: bare numbers, bank dicts, grouping, and 'absent' vs zero")
+
+
+def test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok():
+    """The cart loops skipped any entry without an exact `id` key. cart/set then
+    replaced the cart with the unchanged goods list, answered 200 with a goodsSum,
+    and the tool printed «OK: … N новых позиций» — counting the caller's INPUT. So
+    `goodId`, `good_id`, `product_id` (all plausible for an agent reading a search
+    result) added nothing and reported success.
+
+    Refusing happens in the client, before any request: nothing has been posted, so
+    it is a clean pre-write refusal."""
+    from src.client import TbankApiError
+
+    posted = []
+
+    class CartStub(Stub):
+        def grocery_cart_get(self, **kw):
+            return {"cart": {"goods": [{"id": "111", "count": 1}], "goodsSum": 100.0}}
+
+        def _grocery_delivery(self, *a, **kw):
+            return {}
+
+        def _grocery_cart_write(self, goods, app_id, delivery):
+            posted.append(goods)
+            return {"goodsSum": 100.0}
+
+    out = run(server.grocery_add_to_cart, CartStub(),
+              '[{"goodId": "222", "count": 1}]', "204", "5980")
+    check(not posted, f"a refused write must not reach the backend at all: {posted}")
+    check("id" in out and ("BAD_ITEMS" in out or "без ключа" in out),
+          f"the refusal must name the missing key, got: {out!r}")
+    check("OK" not in out, f"a write that stored nothing must not say OK: {out!r}")
+    check("goodId" in out, f"the refusal should show what key WAS sent: {out!r}")
+
+    # The good path still works, and the count comes from the CART, not the input.
+    class GoodStub(CartStub):
+        def grocery_cart_goods(self, **kw):
+            return [{"id": "111"}, {"id": "222"}]
+
+    ok = run(server.grocery_add_to_cart, GoodStub(),
+             '[{"id": "222", "count": 1}]', "204", "5980")
+    check("OK" in ok and "2 позиций" in ok,
+          f"the reported count must come from the cart, not the request: {ok!r}")
+
+    # set_cart refuses the same way, but clear=True still needs no items.
+    cleared = run(server.grocery_set_cart, GoodStub(), "[]", "204", "5980", True)
+    check("ОШИБКА" not in cleared and "BAD_ITEMS" not in cleared,
+          f"clear=True must not be blocked by the item check: {cleared!r}")
+    try:
+        CartStub().grocery_set_cart([{"good_id": "1", "count": 2}],
+                                    app_id="204", point_id="5980")
+        failures.append("grocery_set_cart accepted an entry with no id key")
+    except TbankApiError as e:
+        check(e.result_code == "BAD_ITEMS", f"unexpected refusal code: {e.result_code}")
+    print("  cart: a wrong key name is refused before the write, not counted as added")
+
+
+def test_concert_seats_print_the_id_the_booking_tool_demands():
+    """cinema_book wants the concert seat's composite id back verbatim, and its
+    docstring plus the tickets skill both say to take it from cinema_seats — which
+    printed only row and number. The required argument was obtainable from no tool.
+    Concert seats also often carry no `pos`, so row-grouping put the whole hall in
+    one «ряд —» bucket."""
+    hall = {"hallName": "Стадион", "seats": [
+        {"status": "vacant", "price": 5000,
+         "id": "Фанзона|5000§~§54093386|default"},
+        {"status": "vacant", "price": 3000, "pos": {"row": 2, "number": 7},
+         "id": "Партер|3000§~§54093387|default"},
+        {"status": "occupied", "price": 1000, "id": "Партер|1000§~§54093388|default"},
+    ]}
+    out = run(server.cinema_seats, Stub(event_seats=[hall]),
+              "e1", "s1", "o1", "", 0, "concert")
+    check("Фанзона|5000§~§54093386|default" in out,
+          f"the composite seatId must be printed verbatim: {out!r}")
+    check("54093388" not in out, f"an occupied seat must not be offered: {out!r}")
+    check("kind=\"concert\"" in out,
+          f"the next-step hint must tell the agent to pass kind: {out!r}")
+    check("ряд:место" not in out,
+          f"the cinema seat format must not be suggested for a concert: {out!r}")
+    check("без нумерации" in out,
+          f"a seat with no pos must say so rather than land in a «ряд —» bucket: {out!r}")
+
+    # Cinemas are unchanged: rows, numbers, and the row:number booking format.
+    movie_hall = {"hallName": "ЗАЛ 1", "seats": [
+        {"status": "vacant", "price": 400, "pos": {"row": 5, "number": 3}}]}
+    mv = run(server.cinema_seats, Stub(event_seats=[movie_hall]), "e1", "s1", "o1")
+    check("ряд" in mv and "ряд:место" in mv,
+          f"the cinema rendering must not have changed: {mv!r}")
+    print("  seats: concerts print the composite seatId, cinemas keep rows")
+
+
+def main():
+    print("response parsers:")
+    test_a_cart_write_with_the_wrong_key_name_is_refused_not_reported_as_ok()
+    test_concert_seats_print_the_id_the_booking_tool_demands()
+    test_a_paid_order_does_not_read_as_unpaid()
+    test_conversation_ids_survive_intact()
+    test_a_dead_messenger_token_is_renewed_not_displayed_as_a_chat()
+    test_documents_merge_and_lists()
+    test_grocery_search_header_is_honest()
+    test_messenger_paging_arguments_reach_the_client()
+    test_the_cart_prints_the_ids_it_must_be_edited_by()
+    test_delivery_speed_is_read_from_both_slot_shapes()
+    test_the_store_list_shows_and_sorts_by_delivery_speed()
+    test_the_invest_envelopes_are_unwrapped()
+    test_money_formatting_is_unambiguous()
+    if failures:
+        print("\nFAILED:")
+        for f in failures:
+            print("  - " + f)
+        return 1
+    print("\nOK")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

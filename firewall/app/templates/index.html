@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Обзор</h1>
+<p class="sub">Всё, что AI-агент пытался сделать с банком. Правила решают, что пройдёт,
+что будет отклонено и что попадёт вам на подтверждение.</p>
+
+<div class="grid cols-4" style="margin-bottom:18px">
+  <div class="stat ok"><div class="n">{{ stats.allowed }}</div><div class="l">разрешено за сутки</div></div>
+  <div class="stat no"><div class="n">{{ stats.denied }}</div><div class="l">заблокировано за сутки</div></div>
+  <div class="stat wait"><div class="n">{{ stats.hitl }}</div><div class="l">ушло на подтверждение</div></div>
+  <div class="stat"><div class="n">{{ "%.0f"|format(stats.spent or 0) }} ₽</div><div class="l">проведено денег за сутки</div></div>
+</div>
+
+<div class="card" id="pendingCard" hidden>
+  <h2>Ждут вашего решения</h2>
+  <div id="pendingList"></div>
+</div>
+
+<div class="card">
+  <div class="row" style="margin-bottom:10px">
+    <h2 style="margin:0">Живая лента</h2>
+    <div class="spacer"></div>
+    <span class="muted" style="font-size:13px">обновляется каждые 3 с</span>
+  </div>
+  <div id="feed"></div>
+</div>
+{% endblock %}

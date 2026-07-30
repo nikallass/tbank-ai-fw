@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Журнал запросов</h1>
+<p class="sub">Каждый вызов тула: что просили, какое правило сработало, чем кончилось.
+Секреты (пароль, PIN, код из SMS, платёжный токен) не сохраняются — только факт,
+что аргумент был.</p>
+
+<div class="card">
+  <div class="row" style="margin-bottom:14px">
+    <select id="fltDecision" style="width:auto">
+      <option value="">Все решения</option>
+      <option value="allow">Разрешено</option>
+      <option value="deny">Заблокировано</option>
+      <option value="hitl">На подтверждении</option>
+    </select>
+    <input type="text" id="fltTool" placeholder="Фильтр по тулу, напр. transfer" style="width:280px">
+    <button class="ghost sm" id="fltClear">Сбросить</button>
+  </div>
+  <div id="feed"></div>
+</div>
+{% endblock %}

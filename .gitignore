@@ -1,0 +1,44 @@
+# ── ничего из этого не должно уехать в публичную репу ───────────────────────
+# Политика и журнал фаервола: там суммы, получатели и счета владельца.
+# В штатной установке база лежит в docker-томе и сюда не попадает, но
+# TBANK_FW_DB умеет положить её куда угодно, в том числе прямо в каталог.
+firewall/data/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Журналы MCP. По умолчанию живут в ~/.local/share/tbank-mcp/, но
+# TBANK_TRACE_FILE / TBANK_EVENTS / TBANK_ATTEMPTS переносят их куда угодно.
+# calls.jsonl хранит аргументы вызовов, attempts.jsonl — тела чекаута.
+session.json
+calls.jsonl
+events.jsonl
+attempts.jsonl
+*.jsonl
+*.jsonl.1
+*.log
+
+# Захваты трафика собственного банка — не для публикации ни в каком виде.
+captures*.xml
+*.har
+
+# Локальные настройки и секреты
+.env
+.env.*
+.claude/settings.local.json
+*.bak
+*.bak-*
+
+# ── окружения и артефакты сборки ────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+.DS_Store
