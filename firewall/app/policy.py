@@ -359,14 +359,23 @@ def check_requisites(facets: dict) -> Decision:
         return Decision(ALLOW)
 
     recipient = str(facets.get("recipient") or "")
-    rows = db.rows("SELECT bank_member_id, pointer_link_id, bank_name FROM "
-                   "resolved_requisites WHERE recipient=?", (recipient,))
+    # У реквизитов есть срок годности. `pointerLinkId` — не постоянный
+    # идентификатор получателя, а связка, которую банк перевыпускает: два
+    # резолва одного и того же номера в один и тот же банк, сделанные с
+    # разницей в минуты, дали 52577212501 и 52577239754. По устаревшей связке
+    # платёж не пройдёт, поэтому старые записи проверку не проходят: пусть
+    # агент сходит в резолв заново, это дешёвое чтение.
+    ttl = float(db.get_setting("requisites_ttl_sec", "1800") or 1800)
+    rows = db.rows("SELECT bank_member_id, pointer_link_id, bank_name, ts FROM "
+                   "resolved_requisites WHERE recipient=? AND ts >= ?",
+                   (recipient, time.time() - ttl))
     if not rows:
         return Decision(DENY, (
-            "переданы реквизиты СБП, которых банк не возвращал: для этого получателя "
-            "transfer_sbp_resolve в журнале нет вообще. Вызови его и возьми "
-            "bankMemberId/pointerLinkId из ответа — или не передавай их совсем, "
-            "тогда банк подберёт получателя сам"))
+            "переданы реквизиты СБП, которых банк не возвращал в последнее время: "
+            "свежего transfer_sbp_resolve для этого получателя в журнале нет. "
+            "Реквизиты СБП живут недолго — банк перевыпускает pointerLinkId, — "
+            "поэтому вызови резолв заново и возьми bankMemberId/pointerLinkId из "
+            "его ответа, а не из старого сообщения"))
     for row in rows:
         if bmi and bmi != row["bank_member_id"]:
             continue

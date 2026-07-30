@@ -201,6 +201,15 @@ _SESSION_FILE = os.environ.get(
     "TBANK_SESSION",
     os.path.expanduser("~/.local/share/tbank-mcp/session.json"),
 )
+# Куда класть скачанные чеки. Раньше был /tmp — файл действительно сохранялся, но
+# пользователь его не находил, а агент приложить к переписке не может: канала для
+# передачи файлов у MCP нет. Папка загрузок решает это без всяких «общих папок
+# между агентами»: файл и так на машине пользователя, надо лишь класть его туда,
+# куда человек привык смотреть.
+_RECEIPTS_DIR = os.environ.get(
+    "TBANK_RECEIPTS_DIR",
+    os.path.expanduser("~/Downloads/tbank-receipts"),
+)
 # Serializes grocery checkouts. FastMCP runs sync tools in the event-loop thread,
 # but checkout is async + offloaded to a worker thread (sync_playwright cannot run
 # inside the loop). A concurrent checkout would race two browsers on one cart →
@@ -3017,23 +3026,31 @@ def insurance_policies() -> str:
 
 @mcp.tool()
 def payment_receipt(payment_id: str, save_to: str = "") -> str:
-    """Скачать PDF-чек по платежу. save_to — путь файла (по умолчанию /tmp).
+    """Скачать PDF-чек по платежу. Файл ложится в папку загрузок пользователя.
+
+    save_to — свой путь, если нужен другой. По умолчанию
+    ~/Downloads/tbank-receipts (переопределяется TBANK_RECEIPTS_DIR).
+
+    Файл сохраняется НА МАШИНЕ ПОЛЬЗОВАТЕЛЯ, но приложить его к переписке
+    нельзя — у агента нет канала для передачи файлов. Скажи пользователю путь,
+    он откроет файл сам. Раньше чек падал в /tmp, где его никто не находил.
 
     payment_id берётся из ответов transfer(), pay_bill(), ticket_pay(), из
     orders() (поле paymentId в строке заказа), grocery_order_status() — и из
     list_operations(with_payment_id=True): банк кладёт его в поле payment
-    большинства операций. Здесь раньше стояло «в list_operations его НЕТ»,
-    и это было неверно — из-за чего чек по уже проведённому платежу считался
-    недостижимым, если ответ тула оплаты потерялся."""
+    большинства операций."""
     try:
         s = _require(); s.ensure_fresh()
         pdf = s.payment_receipt_pdf(payment_id)
         if not pdf.startswith(b"%PDF"):
             return f"Ответ не PDF ({len(pdf)} байт): {pdf[:200]!r}"
-        path = save_to or os.path.join("/tmp", f"receipt-{payment_id}.pdf")
+        path = save_to or os.path.join(_RECEIPTS_DIR, f"receipt-{payment_id}.pdf")
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with open(path, "wb") as fh:
             fh.write(pdf)
-        return f"Чек сохранён: {path} ({len(pdf)} байт)"
+        return (f"Чек сохранён: {path} ({len(pdf)} байт)\n"
+                f"Файл лежит на машине пользователя — приложить его к переписке "
+                f"нельзя, назови путь и предложи открыть.")
     except Exception as e:
         return _err(e)
 

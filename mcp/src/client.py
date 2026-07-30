@@ -44,6 +44,19 @@ DEFAULT_TOKEN_URL = f"{ID_BASE}/auth/token/mobile"
 # so it's a fixed protocol constant, analogous to currencyCode "643" for RUB.
 SBP_PHONE_POINTER_TYPE = "8276"
 
+# Идентификатор участника СБП САМОГО Т-Банка. Нужен ровно для одного: понять, что
+# резолв получателя привёл обратно в наш же банк.
+#
+# get_requisites зовётся с withTinkoff=true, поэтому свой банк попадает в список
+# кандидатов и часто оказывается дефолтным — получатель просто клиент того же
+# банка. Оплатить такое через p2p-anybank нельзя: внешний рельс СБП этот платёж
+# не проводит, а провайдера для внутреннего P2P по номеру в этом клиенте нет.
+# Шлюз отвечает общим «по техническим причинам сервис недоступен».
+#
+# Значение прочитано из живого ответа банка: в резолве эта запись подписана
+# «Т-Банк» и у неё, в отличие от остальных, ПУСТОЕ имя получателя.
+TBANK_SBP_MEMBER_ID = "100000000004"
+
 
 def _need_store(app_id: str, point_id: str) -> tuple[str, str]:
     """Client-layer guard mirroring server._store(): grocery store-scope methods
@@ -2944,6 +2957,44 @@ class MobileSession:
                     raise TbankApiError("RECIPIENT_NOT_RESOLVED",
                         f"{to_account} is not registered in SBP (or the number is wrong). "
                         "Call transfer_sbp_resolve(phone) to check.")
+                # Свой же банк в кандидатах — тупик, а не маршрут. get_requisites
+                # зовётся с withTinkoff=true, поэтому Т-Банк попадает в список и
+                # часто оказывается ДЕФОЛТНЫМ: получатель — клиент того же банка.
+                # Оплатить это через p2p-anybank нельзя, внешний рельс СБП такой
+                # платёж не проводит, а провайдера «своему клиенту по телефону» в
+                # этом клиенте нет вовсе. Шлюз отвечает общим «по техническим
+                # причинам сервис недоступен», и десять попыток подряд выглядят
+                # как авария банка.
+                #
+                # Проверено живьём: комиссия по этому же конверту считается (она
+                # маршрут не строит), сам платёж падает; тот же перевод с явно
+                # выбранным ВНЕШНИМ банком проходит.
+                #
+                # Признак — идентификатор участника СБП самого Т-Банка. У этой
+                # записи вдобавок пустой maskedFIO, тогда как у настоящих банков
+                # получателя имя есть.
+                external = [x for x in resolved
+                            if str(x["bank_member_id"]) != TBANK_SBP_MEMBER_ID]
+                internal = [x for x in resolved
+                            if str(x["bank_member_id"]) == TBANK_SBP_MEMBER_ID]
+                if internal and not external:
+                    raise TbankApiError("RECIPIENT_INSIDE_TBANK",
+                        f"{to_account} — клиент этого же банка, и других банков СБП "
+                        f"у номера нет. Перевод внутри банка по номеру телефона через "
+                        f"этот тул не проходит: маршрут p2p-anybank его не проводит, а "
+                        f"отдельного провайдера для внутреннего P2P здесь нет. "
+                        f"Переведи в приложении банка.")
+                if internal and external:
+                    raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
+                        f"{to_account} по умолчанию ведёт в этот же банк, а такой "
+                        f"перевод через СБП не проводится. Выбери ВНЕШНИЙ банк:\n" +
+                        "\n".join(f"  - {x['masked_fio']} | {x['bank_name']} | "
+                                  f"bankMemberId={x['bank_member_id']} | "
+                                  f"pointerLinkId={x['pointer_link_id']}"
+                                  for x in external) +
+                        "\nПередай выбранные bank_member_id + pointer_link_id в "
+                        "transfer(). Реквизиты живут недолго — бери их из СВЕЖЕГО "
+                        "transfer_sbp_resolve(), а не из старого ответа.")
                 pick = next((x for x in resolved if x["is_default_bank"]), None)
                 if pick is None and len(resolved) == 1:
                     pick = resolved[0]

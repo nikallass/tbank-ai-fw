@@ -163,6 +163,25 @@ with TestClient(app) as c:
           c.post("/api/v1/authorize", json={"tool": "transfer", "args": {
               "amount": 100, "to_account": "+79770001122"}}).json()["decision"], "hitl")
 
+    # Реквизиты протухают: банк перевыпускает pointerLinkId, и по старой связке
+    # платёж не пройдёт. Живьём два резолва одного номера в один банк с разницей
+    # в минуты дали 52577212501 и 52577239754.
+    import time as _t
+    from app import db as _db
+    _db.run("UPDATE resolved_requisites SET ts=? WHERE recipient=?",
+            (_t.time() - 7200, "+79770001122"))
+    # Сумма другая намеренно: тот же вызов попал бы в уже висящее подтверждение
+    # (ветка дедупликации в authorize) и политику бы не переспросили.
+    stale_call = dict(real, args=dict(real["args"], amount=101))
+    stale = c.post("/api/v1/authorize", json=stale_call).json()
+    check("устаревшие реквизиты не проходят", stale["decision"], "deny")
+    assert "недолго" in stale["reason"] or "свежего" in stale["reason"], stale["reason"]
+    _db.run("UPDATE resolved_requisites SET ts=? WHERE recipient=?",
+            (_t.time(), "+79770001122"))
+    check("свежие реквизиты снова проходят",
+          c.post("/api/v1/authorize", json=dict(
+              real, args=dict(real["args"], amount=102))).json()["decision"], "hitl")
+
     # Проверку можно выключить — но по умолчанию она включена.
     c.post("/api/v1/settings", json={"require_resolved_requisites": "0"})
     check("выключенная проверка пропускает",

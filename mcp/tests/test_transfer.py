@@ -583,6 +583,64 @@ def test_a_refusal_is_not_reported_as_a_possible_charge():
     print("  outcomes: refusals and rejections say the money is safe; only transport is unknown")
 
 
+def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
+    """Резолв зовётся с withTinkoff=true, поэтому свой же банк попадает в список
+    кандидатов и часто оказывается ДЕФОЛТНЫМ: получатель — клиент того же банка.
+    Раньше авторезолв молча брал его и платил через p2p-anybank — внешний рельс
+    СБП такого платежа не проводит, а провайдера для внутреннего P2P по номеру
+    здесь нет. Шлюз отвечал общим «по техническим причинам сервис недоступен», и
+    десять попыток подряд читались как авария банка.
+
+    Проверено живьём: комиссия по тому же конверту считается (она маршрут не
+    строит), платёж падает, а тот же перевод с явно выбранным ВНЕШНИМ банком
+    проходит."""
+    from src.client import TBANK_SBP_MEMBER_ID, TbankApiError
+
+    def cand(member, name, fio, default):
+        return {"bank_member_id": member, "bank_name": name, "masked_fio": fio,
+                "pointer_link_id": "1", "bank_id": "b", "is_default_bank": default,
+                "provider_fields": {}}
+
+    class Res(CaptureSession):
+        def __init__(self, cands):
+            super().__init__()
+            self._cands = cands
+
+        def resolve_sbp_recipient(self, phone):
+            return self._cands
+
+    # Свой банк дефолтом, есть внешние — отказ со списком внешних.
+    s = Res([cand(TBANK_SBP_MEMBER_ID, "Т-Банк", "", True),
+             cand("100000000111", "Сбербанк", "Ольга М.", False)])
+    try:
+        s.transfer(10, "+79991234567", account="0000000000")
+        check(False, "перевод ушёл в свой же банк по внешнему рельсу СБП")
+    except TbankApiError as e:
+        check(e.result_code == "RECIPIENT_MULTIPLE_BANKS",
+              f"не тот отказ: {e.result_code}")
+        check("100000000111" in str(e.message),
+              "в отказе нет внешнего банка, который можно выбрать")
+        check(TBANK_SBP_MEMBER_ID not in str(e.message),
+              "в списке для выбора остался свой же банк — его и выберут снова")
+
+    # Только свой банк — выбирать не из чего, отправляем в приложение.
+    s = Res([cand(TBANK_SBP_MEMBER_ID, "Т-Банк", "", True)])
+    try:
+        s.transfer(10, "+79991234567", account="0000000000")
+        check(False, "перевод ушёл, хотя внешних банков у номера нет")
+    except TbankApiError as e:
+        check(e.result_code == "RECIPIENT_INSIDE_TBANK",
+              f"не тот отказ: {e.result_code}")
+
+    # Только внешние — обычный путь не тронут.
+    s = Res([cand("100000000111", "Сбербанк", "Ольга М.", True)])
+    s.transfer(10, "+79991234567", account="0000000000")
+    pf = s.sent_pay_parameters()["providerFields"]
+    check(pf["bankMemberId"] == "100000000111",
+          f"внешний получатель поехал не туда: {pf['bankMemberId']}")
+    print("  recipient: свой же банк не маршрутизируется молча, внешний проходит")
+
+
 def test_the_recipient_bank_the_user_picked_is_the_one_used():
     """The gate required three fields while every agent-facing string promises two, so
     an agent that followed the docs had its chosen SBP bank silently replaced."""
@@ -816,6 +874,7 @@ def main():
     test_payment_commission_rejects_a_body_it_cannot_use()
     test_a_refusal_is_not_reported_as_a_possible_charge()
     test_the_recipient_bank_the_user_picked_is_the_one_used()
+    test_a_recipient_inside_our_own_bank_is_refused_not_routed()
     if failures:
         print("\nFAILED:")
         for f in failures:
