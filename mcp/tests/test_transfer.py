@@ -620,6 +620,15 @@ def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
               f"не тот отказ: {e.result_code}")
         check("Сбербанк" in str(e.message),
               "в отказе не назван внешний банк, который можно выбрать")
+        # Свой банк из списка НЕ вычёркивается: он у получателя действительно
+        # есть, и умалчивать — врать о том, что вернул банк. Агент начинал
+        # уверять пользователя, что такого банка нет, хотя в приложении перевод
+        # туда работает.
+        check("Т-Банк" in str(e.message),
+              "свой банк вычеркнут из списка — агент скажет, что его у получателя "
+              "нет, и это будет неправдой")
+        check("приложении" in str(e.message),
+              "не сказано, где этот перевод всё-таки возможен")
         # Идентификаторы в тексте отказа — ловушка. Этот резолв прошёл ВНУТРИ
         # transfer(), мимо тула transfer_sbp_resolve, поэтому фаервол его не
         # видел и такие реквизиты не признает: агент берёт их из ошибки,
@@ -642,6 +651,17 @@ def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
     except TbankApiError as e:
         check(e.result_code == "RECIPIENT_INSIDE_TBANK",
               f"не тот отказ: {e.result_code}")
+
+    # Явно выбранный свой банк — отказ до отправки, а не общая ошибка от шлюза.
+    s = Res([cand(TBANK_SBP_MEMBER_ID, "Т-Банк", "", True),
+             cand("100000000111", "Сбербанк", "Ольга М.", False)])
+    try:
+        s.transfer(10, "+79991234567", account="0000000000",
+                   bank_member_id=TBANK_SBP_MEMBER_ID, pointer_link_id="1")
+        check(False, "явно выбранный свой банк ушёл в оплату и упадёт общей ошибкой")
+    except TbankApiError as e:
+        check(e.result_code == "RECIPIENT_INSIDE_TBANK",
+              f"не тот отказ на явный выбор своего банка: {e.result_code}")
 
     # Только внешние — обычный путь не тронут.
     s = Res([cand("100000000111", "Сбербанк", "Ольга М.", True)])

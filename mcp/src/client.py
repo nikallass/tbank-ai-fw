@@ -2977,24 +2977,40 @@ class MobileSession:
                             if str(x["bank_member_id"]) != TBANK_SBP_MEMBER_ID]
                 internal = [x for x in resolved
                             if str(x["bank_member_id"]) == TBANK_SBP_MEMBER_ID]
-                if internal and not external:
-                    raise TbankApiError("RECIPIENT_INSIDE_TBANK",
-                        f"{to_account} — клиент этого же банка, и других банков СБП "
-                        f"у номера нет. Перевод внутри банка по номеру телефона через "
-                        f"этот тул не проходит: маршрут p2p-anybank его не проводит, а "
-                        f"отдельного провайдера для внутреннего P2P здесь нет. "
-                        f"Переведи в приложении банка.")
-                if internal and external:
-                    raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
-                        f"{to_account} по умолчанию ведёт в этот же банк, а такой "
-                        f"перевод через СБП не проводится. Выбери ВНЕШНИЙ банк:\n" +
-                        "\n".join(f"  - {x['masked_fio'] or 'без имени'} | {x['bank_name']}"
-                                  for x in external) +
+                if internal:
+                    # Свой банк из списка НЕ вычёркивается. Он у получателя
+                    # действительно есть, и умалчивать об этом — врать о том, что
+                    # вернул банк: агент начинает уверять пользователя, будто
+                    # такого банка нет, хотя в мобильном приложении перевод туда
+                    # работает. Не реализован он ЗДЕСЬ: внутренний P2P по номеру
+                    # идёт другим путём, которого в захвате нет, а p2p-anybank
+                    # такой платёж не проводит (шлюз отвечает общей ошибкой).
+                    lines = []
+                    for x in resolved:
+                        mark = ("  ← через этот тул не проводится, только в "
+                                "приложении банка"
+                                if str(x["bank_member_id"]) == TBANK_SBP_MEMBER_ID
+                                else "")
+                        lines.append(f"  - {x['masked_fio'] or 'без имени'} | "
+                                     f"{x['bank_name']}{mark}")
+                    tail = (
                         "\nДальше: спроси пользователя, какой банк, вызови "
                         "transfer_sbp_resolve(phone) и возьми bank_member_id + "
                         "pointer_link_id ИЗ ЕГО ОТВЕТА. Здесь они не приводятся "
                         "намеренно: реквизиты живут минуты, а взятые из текста ошибки "
                         "не пройдут проверку — она сверяет их со свежим резолвом.")
+                    if not external:
+                        raise TbankApiError("RECIPIENT_INSIDE_TBANK",
+                            f"{to_account} в СБП есть только в этом же банке:\n" +
+                            "\n".join(lines) +
+                            "\nПеревод внутри банка по номеру телефона в этом туле не "
+                            "реализован — в приложении банка он есть, это другой путь. "
+                            "Скажи это пользователю прямо, не выдумывай обходных "
+                            "маршрутов и не утверждай, что такого банка у получателя нет.")
+                    raise TbankApiError("RECIPIENT_MULTIPLE_BANKS",
+                        f"{to_account} есть в {len(resolved)} банках СБП, и по "
+                        f"умолчанию ведёт в этот же банк — нужен выбор:\n" +
+                        "\n".join(lines) + tail)
                 pick = next((x for x in resolved if x["is_default_bank"]), None)
                 if pick is None and len(resolved) == 1:
                     pick = resolved[0]
@@ -3015,6 +3031,16 @@ class MobileSession:
                 bank_member_id = pick["bank_member_id"]
                 masked_fio = pick["masked_fio"]
                 pointer_link_id = pick["pointer_link_id"]
+            elif str(bank_member_id) == TBANK_SBP_MEMBER_ID:
+                # Выбор сделан явно — и ведёт в тот же тупик. Лучше сказать это
+                # до отправки, чем отдать пользователю общее «сервис недоступен»
+                # и оставить его гадать, что случилось с деньгами.
+                raise TbankApiError("RECIPIENT_INSIDE_TBANK",
+                    f"Выбран этот же банк ({to_account}). Перевод внутри банка по "
+                    f"номеру телефона в этом туле не реализован: p2p-anybank такой "
+                    f"платёж не проводит, шлюз отвечает общей ошибкой. В приложении "
+                    f"банка этот перевод есть — это другой путь. Выбери внешний банк "
+                    f"получателя или скажи пользователю переводить в приложении.")
             elif not masked_fio:
                 # The ids came from the caller, so the routing is already decided.
                 # Look up the display name only — never let this overwrite the choice.
