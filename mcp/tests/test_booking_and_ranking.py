@@ -278,6 +278,13 @@ def test_the_ticket_payment_names_its_calling_system():
         def ensure_fresh(self, *a, **kw):
             return None
 
+        # Платёжный шлюз поднимает сессию до CLIENT перед запросом
+        # (client._CLIENT_LEVEL_TEMPLATES). Здесь проверяется тело оплаты билета,
+        # а не обновление сессии, поэтому подъём — заглушка. Сам подъём
+        # проверяется в tests/test_payment_gate_level.py.
+        def ensure_client_session(self):
+            return "CLIENT"
+
         def _unwrap(self, r):
             return {"paymentId": "1", "stage": {"status": "SUCCESS"}}
 

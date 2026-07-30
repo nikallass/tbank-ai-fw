@@ -708,12 +708,34 @@ class MobileSession:
                 f"tmsg-sdk-iOS:1.0.0; iOS:{_IOS_VERSION}; device:{self.device_model}")
         return h
 
+    # Эндпоинты платёжного шлюза. Им мало живого Bearer — им нужен sessionid
+    # уровня CLIENT, а его окно ~11 минут против ~2 часов у токена (см.
+    # ensure_client_session). Когда окно закрылось, шлюз отвечает голым 403
+    # Forbidden или общим «по техническим причинам сервис недоступен», и это
+    # неотличимо от блокировки по антифроду: чтения при этом продолжают работать,
+    # потому что живут на Bearer.
+    #
+    # Проверено экспериментом на живом счёте: payment_commission (денег не
+    # двигает) с одним ensure_fresh даёт 403, а сразу после ensure_client_session
+    # считает комиссию.
+    #
+    # Список здесь, а не у вызывающих, намеренно: денежных точек входа четыре, и
+    # тот вызов, где про уровень забудут, окажется именно платежом.
+    _CLIENT_LEVEL_TEMPLATES = frozenset({
+        "v1_pay", "payment_commission", "payment_gate_pay", "payment_gate_pay_mobile",
+    })
+
+    def _ensure_level_for(self, template_key: str) -> None:
+        if template_key in self._CLIENT_LEVEL_TEMPLATES:
+            self.ensure_client_session()
+
     def _call_read(self, template_key: str, *, overrides: dict | None = None,
                    body: dict | None = None, path_override: str | None = None) -> Any:
         """Replay a read endpoint (builtin shape) with fresh sessionid + Bearer.
 
         path_override replaces the path (for parameterized endpoints like
         messenger conversations/{id}/messages)."""
+        self._ensure_level_for(template_key)
         tpl = self._tpl(template_key)
         params = {k: v for k, v in tpl.get("params", {}).items()
                   if k not in _LIVE_QUERY}
@@ -886,6 +908,10 @@ class MobileSession:
     def _call_signed(self, template_key: str, body_str: str,
                      extra_query: dict | None = None) -> Any:
         """POST a signed request (private; only pay_execute/human use)."""
+        # Уровень поднимается ДО сборки запроса: ensure_client_session умеет
+        # перевыпустить сессию, а sessionid входит и в подпись, и в query —
+        # подписать старым, а отправить с новым нельзя.
+        self._ensure_level_for(template_key)
         url, headers, body_str = self._signed_parts(template_key, body_str, extra_query)
         r = self._http.post(url, data=body_str, headers=headers, timeout=30)
         return self._unwrap(r)

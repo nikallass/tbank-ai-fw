@@ -87,6 +87,13 @@ def session(payload=None):
     s.client_version, s.inache = "112.0.0", "drivetransitt"
     s.base_url = "https://api.t-bank-app.ru"
     s._memo = {}
+    # Сессия стаба уже «свежая»: эти тесты проверяют форму запроса, а не
+    # обновление токена. Без заглушки эндпоинты платёжного шлюза уходят
+    # поднимать уровень (client._CLIENT_LEVEL_TEMPLATES) и утыкаются в refresh,
+    # которого у объекта из __new__ нет. Сам подъём уровня проверяется отдельно —
+    # tests/test_payment_gate_level.py.
+    s.ensure_client_session = lambda: "CLIENT"
+    s.ensure_fresh = lambda *a, **kw: None
     s._http = FakeHTTP(payload)
     return s
 
