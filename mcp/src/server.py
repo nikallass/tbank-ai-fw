@@ -238,6 +238,10 @@ def _save_session(s):
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(d, fh, ensure_ascii=False)
         os.chmod(_SESSION_FILE, 0o600)
+        # Свою же запись перечитывать незачем: без этого _require() увидел бы
+        # свежий mtime и грузил файл заново после каждого обновления токена.
+        global _session_mtime
+        _session_mtime = os.path.getmtime(_SESSION_FILE)
         print(f"[tbank] session saved: {_SESSION_FILE} ({os.path.getsize(_SESSION_FILE)} bytes, 0600)", file=sys.stderr)
     except OSError as e:
         print(f"[tbank] session save failed: {e}", file=sys.stderr)
@@ -264,10 +268,34 @@ def _load_session():
         return None
 
 
+# mtime файла сессии на момент последней загрузки. Ноль — ещё не загружали.
+_session_mtime = 0.0
+
+
 def _require():
-    global _session
-    if _session is None:
-        _session = _with_persist(_load_session())
+    """Живая сессия, перечитанная с диска, если её переписали снаружи.
+
+    У файла сессии теперь БОЛЬШЕ ОДНОГО держателя: демон входа (`src/authd.py`,
+    в т.ч. в контейнере) и этот процесс. Любое обновление РОТИРУЕТ refresh_token,
+    поэтому держатель, у которого копия в памяти, после чужого обновления сидит
+    с истраченным токеном. Дальше его refresh не проходит, клиент откатывается на
+    silent_relogin, уровень сессии падает — и наружу это выглядит как
+    INSUFFICIENT_PRIVILEGES на обычном чтении счетов, при том что страница входа
+    честно показывает «сессия активна»: она-то читает файл заново каждый раз.
+
+    Стоимость лечения — один stat на вызов тула. Файл всегда перечитывается
+    целиком, а не сравнивается по полям: разъезд между процессами и так уже
+    случился, и мержить два состояния одной сессии нечем."""
+    global _session, _session_mtime
+    try:
+        mtime = os.path.getmtime(_SESSION_FILE)
+    except OSError:
+        mtime = 0.0
+    if _session is None or (mtime and mtime > _session_mtime):
+        loaded = _load_session()
+        if loaded is not None:
+            _session = _with_persist(loaded)
+            _session_mtime = mtime
     if not _session or not _session.mobile_sessionid:
         raise TbankApiError("NO_SESSION",
             "Call login(phone) first.")
