@@ -3187,6 +3187,10 @@ async def choose_recipient_bank(phone: str, ctx: Context) -> str:
         if not resolved:
             return f"{phone}: получатель не зарегистрирован в СБП (или неверный номер)."
         options = _bank_options(resolved)
+        # Резолв прошёл через клиент, мимо тула transfer_sbp_resolve, — фаервол
+        # его не видел. Без этой строчки он отвергнет реквизиты, которые сам же
+        # тул и выдал: ровно так и ломался живой диалог.
+        guard.remember_requisites(phone, options)
         usable = [o for o in options if o["supported"]]
         if not usable:
             return (f"{phone}: единственный банк получателя — этот же банк, а перевод "
@@ -3233,12 +3237,16 @@ async def choose_recipient_bank(phone: str, ctx: Context) -> str:
 
 
 def _picked_text(o: dict) -> str:
+    # Отдаём ТОЛЬКО номер банка. pointerLinkId эфемерен — банк перевыпускает его
+    # за минуты, — и заставлять агента таскать его через переписку значит рано
+    # или поздно получить протухший. transfer() доберёт свежий сам.
     return (f"Банк выбран: {o['bank_name']}"
             f"{(' — ' + o['masked_fio']) if o['masked_fio'] else ''}.\n"
-            f"Передай в transfer(): bank_member_id=\"{o['bank_member_id']}\", "
-            f"pointer_link_id=\"{o['pointer_link_id']}\""
-            f"{(', masked_fio=' + chr(34) + o['masked_fio'] + chr(34)) if o['masked_fio'] else ''}.\n"
-            f"Делай это сразу: реквизиты живут минуты, потом фаервол их не примет.")
+            f"Передай в transfer() ТОЛЬКО bank_member_id=\"{o['bank_member_id']}\""
+            f"{(' и masked_fio=' + chr(34) + o['masked_fio'] + chr(34)) if o['masked_fio'] else ''}. "
+            f"pointer_link_id НЕ передавай: он живёт минуты, и transfer возьмёт "
+            f"свежий сам прямо перед платежом. Номер банка можно использовать "
+            f"и позже — он не протухает.")
 
 
 @mcp.tool()

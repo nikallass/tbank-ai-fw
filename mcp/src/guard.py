@@ -143,6 +143,19 @@ def pending() -> dict:
     return _get("/api/v1/pending")
 
 
+def remember_requisites(phone: str, options: list) -> None:
+    """Сообщить фаерволу, что банк вернул по этому номеру.
+
+    Резолв внутри клиента идёт мимо тулов, поэтому фаервол про эти реквизиты
+    иначе не узнаёт — и отвергает те, что сам же MCP только что выдал агенту.
+    Молча не падает: не сообщили — агент упрётся в отказ, но деньги в опасности
+    не окажутся."""
+    try:
+        _post("/api/v1/requisites", {"recipient": phone, "candidates": options})
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        print(f"[tbank-firewall] реквизиты не переданы фаерволу: {e}", file=sys.stderr)
+
+
 def create_choice(phone: str, options: list, amount=None, from_account: str = "") -> dict:
     """Завести в фаерволе выбор банка. None, если фаервол недоступен.
 

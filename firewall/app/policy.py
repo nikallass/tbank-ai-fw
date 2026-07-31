@@ -365,17 +365,26 @@ def check_requisites(facets: dict) -> Decision:
     # разницей в минуты, дали 52577212501 и 52577239754. По устаревшей связке
     # платёж не пройдёт, поэтому старые записи проверку не проходят: пусть
     # агент сходит в резолв заново, это дешёвое чтение.
+    # Срок годности — только у СВЯЗКИ. bankMemberId это номер банка в СБП, он
+    # стабилен; pointerLinkId банк перевыпускает за минуты. Требовать свежести от
+    # обоих значило гонять агента за резолвом после каждой паузы в разговоре —
+    # что и происходило. Теперь: банк сверяем по всей истории, связку — только
+    # если её вообще передали, и тогда она обязана быть свежей.
     ttl = float(db.get_setting("requisites_ttl_sec", "1800") or 1800)
-    rows = db.rows("SELECT bank_member_id, pointer_link_id, bank_name, ts FROM "
-                   "resolved_requisites WHERE recipient=? AND ts >= ?",
-                   (recipient, time.time() - ttl))
+    if plid:
+        rows = db.rows("SELECT bank_member_id, pointer_link_id, bank_name, ts FROM "
+                       "resolved_requisites WHERE recipient=? AND ts >= ?",
+                       (recipient, time.time() - ttl))
+    else:
+        rows = db.rows("SELECT bank_member_id, pointer_link_id, bank_name, ts FROM "
+                       "resolved_requisites WHERE recipient=?", (recipient,))
     if not rows:
         return Decision(DENY, (
-            "переданы реквизиты СБП, которых банк не возвращал в последнее время: "
-            "свежего transfer_sbp_resolve для этого получателя в журнале нет. "
-            "Реквизиты СБП живут недолго — банк перевыпускает pointerLinkId, — "
-            "поэтому вызови резолв заново и возьми bankMemberId/pointerLinkId из "
-            "его ответа, а не из старого сообщения"))
+            "переданы реквизиты СБП, которых банк для этого получателя не возвращал"
+            + (" в последнее время (связка pointerLinkId живёт минуты)" if plid else "")
+            + ". Вызови choose_recipient_bank(phone) — он сделает свежий резолв, "
+            "покажет банки и вернёт то, что нужно передать. Проще всего передавать "
+            "ТОЛЬКО bank_member_id: связку клиент доберёт сам перед платежом"))
     for row in rows:
         if bmi and bmi != row["bank_member_id"]:
             continue
@@ -388,7 +397,8 @@ def check_requisites(facets: dict) -> Decision:
     return Decision(DENY, (
         f"реквизиты СБП не совпадают с тем, что вернул банк: прислано "
         f"{bmi or '—'}/{plid or '—'}, а резолв давал {known}. Не подставляй эти "
-        f"идентификаторы сам — вызови transfer_sbp_resolve заново"))
+        f"идентификаторы сам — вызови choose_recipient_bank(phone) и передай "
+        f"ТОЛЬКО bank_member_id выбранного банка"))
 
 
 def evaluate(facets: dict, now: float | None = None) -> Decision:

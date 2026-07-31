@@ -175,7 +175,22 @@ with TestClient(app) as c:
     stale_call = dict(real, args=dict(real["args"], amount=101))
     stale = c.post("/api/v1/authorize", json=stale_call).json()
     check("устаревшие реквизиты не проходят", stale["decision"], "deny")
-    assert "недолго" in stale["reason"] or "свежего" in stale["reason"], stale["reason"]
+    assert "живёт минуты" in stale["reason"], stale["reason"]
+
+    # Номер банка НЕ протухает: он стабилен, перевыпускается только связка.
+    # Требовать свежести от обоих значило гонять агента за резолвом после каждой
+    # паузы в разговоре — на это он и упирался в живом диалоге.
+    _db.run("UPDATE resolved_requisites SET ts=? WHERE recipient=?",
+            (_t.time() - 7200, "+79770001122"))
+    only_bank = {"tool": "transfer", "agent": "test", "args": {
+        "amount": 103, "to_account": "+79770001122",
+        "bank_member_id": "100000000222"}}
+    check("старый номер банка без связки проходит",
+          c.post("/api/v1/authorize", json=only_bank).json()["decision"], "hitl")
+    check("выдуманный номер банка не проходит и без связки",
+          c.post("/api/v1/authorize", json=dict(only_bank, args=dict(
+              only_bank["args"], amount=104, bank_member_id="999999999999"))
+          ).json()["decision"], "deny")
     _db.run("UPDATE resolved_requisites SET ts=? WHERE recipient=?",
             (_t.time(), "+79770001122"))
     check("свежие реквизиты снова проходят",

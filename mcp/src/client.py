@@ -2957,7 +2957,39 @@ class MobileSession:
             # silently replaced the bank the user had picked and confirmed. Same
             # person, different account, and invisible: the result line prints the
             # recipient only when masked_fio is set.
-            if not (bank_member_id and pointer_link_id):
+            if str(bank_member_id) == TBANK_SBP_MEMBER_ID:
+                # Проверка стоит ПЕРВОЙ: ниже есть ветка, которая добирает связку
+                # по одному лишь bankMemberId, и без этого выбор своего банка
+                # проскочил бы мимо запрета и упёрся в общую ошибку шлюза.
+                raise TbankApiError("RECIPIENT_INSIDE_TBANK",
+                    f"Выбран этот же банк ({to_account}). Перевод внутри банка по "
+                    f"номеру телефона в этом туле не реализован: p2p-anybank такой "
+                    f"платёж не проводит, шлюз отвечает общей ошибкой. В приложении "
+                    f"банка этот перевод есть — это другой путь. Выбери внешний банк "
+                    f"получателя или скажи пользователю переводить в приложении.")
+            if bank_member_id and not pointer_link_id:
+                # Банк выбран, связка не передана — и это НОРМАЛЬНЫЙ путь.
+                #
+                # Из двух идентификаторов стабилен только bankMemberId: это номер
+                # банка в СБП. pointerLinkId — связка получателя, которую банк
+                # перевыпускает: два резолва одного номера в один банк с разницей
+                # в минуты дают разные значения. Заставлять агента таскать её
+                # через переписку значит гарантировать, что рано или поздно он
+                # принесёт протухшую и упрётся в отказ — что и происходило.
+                #
+                # Поэтому: помнить нужно только БАНК, а свежую связку добираем
+                # здесь сами, прямо перед платежом.
+                resolved = self.resolve_sbp_recipient(to_account)
+                pick = next((x for x in resolved
+                             if str(x["bank_member_id"]) == str(bank_member_id)), None)
+                if pick is None:
+                    raise _with_candidates(TbankApiError("RECIPIENT_BANK_NOT_FOUND",
+                        f"Банк {bank_member_id} у номера {to_account} сейчас не значится. "
+                        f"Вызови choose_recipient_bank(phone) и выбери заново — "
+                        f"список банков получателя мог измениться."), resolved)
+                pointer_link_id = pick["pointer_link_id"]
+                masked_fio = masked_fio or pick["masked_fio"]
+            elif not (bank_member_id and pointer_link_id):
                 # Auto-resolve the recipient via get_requisites (read-only). Pick the
                 # default bank if any, else the single match; if several with NO
                 # default, refuse + surface the list — money safety: never silently
@@ -3041,16 +3073,6 @@ class MobileSession:
                 bank_member_id = pick["bank_member_id"]
                 masked_fio = pick["masked_fio"]
                 pointer_link_id = pick["pointer_link_id"]
-            elif str(bank_member_id) == TBANK_SBP_MEMBER_ID:
-                # Выбор сделан явно — и ведёт в тот же тупик. Лучше сказать это
-                # до отправки, чем отдать пользователю общее «сервис недоступен»
-                # и оставить его гадать, что случилось с деньгами.
-                raise TbankApiError("RECIPIENT_INSIDE_TBANK",
-                    f"Выбран этот же банк ({to_account}). Перевод внутри банка по "
-                    f"номеру телефона в этом туле не реализован: p2p-anybank такой "
-                    f"платёж не проводит, шлюз отвечает общей ошибкой. В приложении "
-                    f"банка этот перевод есть — это другой путь. Выбери внешний банк "
-                    f"получателя или скажи пользователю переводить в приложении.")
             elif not masked_fio:
                 # The ids came from the caller, so the routing is already decided.
                 # Look up the display name only — never let this overwrite the choice.

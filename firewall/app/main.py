@@ -312,6 +312,40 @@ class ChoiceIn(BaseModel):
     candidates: list[dict] = Field(default_factory=list)
 
 
+class RequisitesIn(BaseModel):
+    recipient: str = ""
+    candidates: list[dict] = Field(default_factory=list)
+
+
+def _store_requisites(recipient: str, candidates: list) -> int:
+    now = time.time()
+    saved = 0
+    for c in candidates:
+        bmi = str(c.get("bank_member_id") or "").strip()
+        plid = str(c.get("pointer_link_id") or "").strip()
+        if not recipient or not (bmi or plid):
+            continue
+        db.run(
+            "INSERT INTO resolved_requisites(recipient, bank_member_id, "
+            "pointer_link_id, bank_name, masked_fio, ts) VALUES (?,?,?,?,?,?) "
+            "ON CONFLICT(recipient, bank_member_id, pointer_link_id) "
+            "DO UPDATE SET ts=excluded.ts, bank_name=excluded.bank_name, "
+            "masked_fio=excluded.masked_fio",
+            (recipient, bmi, plid, str(c.get("bank_name") or ""),
+             str(c.get("masked_fio") or ""), now))
+        saved += 1
+    return saved
+
+
+@app.post("/api/v1/requisites")
+def requisites_remember(payload: RequisitesIn) -> dict:
+    """Запомнить, что банк вернул по номеру. Пишет только MCP, и только то, что
+    пришло ОТ БАНКА: резолв внутри клиента идёт мимо тулов, и без этой ручки
+    фаервол отвергает реквизиты, которые сам же MCP выдал агенту."""
+    recipient = facets_mod.norm_phone(payload.recipient) if payload.recipient else ""
+    return {"ok": True, "saved": _store_requisites(recipient, payload.candidates)}
+
+
 @app.post("/api/v1/choice")
 def choice_create(payload: ChoiceIn) -> dict:
     """Завести выбор банка получателя — человек решит кликом.
@@ -330,19 +364,7 @@ def choice_create(payload: ChoiceIn) -> dict:
         (cid, now, now + ttl, "pending", recipient, payload.amount,
          payload.from_account, payload.agent,
          json.dumps(payload.candidates, ensure_ascii=False)))
-    for c in payload.candidates:
-        bmi = str(c.get("bank_member_id") or "").strip()
-        plid = str(c.get("pointer_link_id") or "").strip()
-        if not recipient or not (bmi or plid):
-            continue
-        db.run(
-            "INSERT INTO resolved_requisites(recipient, bank_member_id, "
-            "pointer_link_id, bank_name, masked_fio, ts) VALUES (?,?,?,?,?,?) "
-            "ON CONFLICT(recipient, bank_member_id, pointer_link_id) "
-            "DO UPDATE SET ts=excluded.ts, bank_name=excluded.bank_name, "
-            "masked_fio=excluded.masked_fio",
-            (recipient, bmi, plid, str(c.get("bank_name") or ""),
-             str(c.get("masked_fio") or ""), now))
+    _store_requisites(recipient, payload.candidates)
     base_url = db.get_setting("base_url").rstrip("/")
     return {"choice_id": cid, "url": f"{base_url}/choice/{cid}", "ttl_sec": ttl}
 

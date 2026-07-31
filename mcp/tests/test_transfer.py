@@ -663,6 +663,30 @@ def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
         check(e.result_code == "RECIPIENT_INSIDE_TBANK",
               f"не тот отказ на явный выбор своего банка: {e.result_code}")
 
+    # Передан ТОЛЬКО номер банка — связку клиент добирает свежую сам.
+    # Это основной путь: bankMemberId стабилен, pointerLinkId живёт минуты, и
+    # таскать его через переписку значит рано или поздно принести протухший.
+    s = Res([cand(TBANK_SBP_MEMBER_ID, "Т-Банк", "", True),
+             cand("100000000111", "Сбербанк", "Ольга М.", False)])
+    s._cands[1]["pointer_link_id"] = "СВЕЖАЯ-СВЯЗКА"
+    s.transfer(10, "+79991234567", account="0000000000",
+               bank_member_id="100000000111")
+    pf = s.sent_pay_parameters()["providerFields"]
+    check(pf["pointerLinkId"] == "СВЕЖАЯ-СВЯЗКА",
+          f"связка не добрана из свежего резолва: {pf['pointerLinkId']}")
+    check(pf["bankMemberId"] == "100000000111", "поехал не тот банк")
+    check(pf["maskedFIO"] == "Ольга М.", "имя получателя не подтянулось")
+
+    # Банк, которого у номера больше нет, — отказ, а не тихий выбор другого.
+    s = Res([cand("100000000111", "Сбербанк", "Ольга М.", True)])
+    try:
+        s.transfer(10, "+79991234567", account="0000000000",
+                   bank_member_id="100000000999")
+        check(False, "исчезнувший банк не вызвал отказа")
+    except TbankApiError as e:
+        check(e.result_code == "RECIPIENT_BANK_NOT_FOUND",
+              f"не тот отказ на исчезнувший банк: {e.result_code}")
+
     # Только внешние — обычный путь не тронут.
     s = Res([cand("100000000111", "Сбербанк", "Ольга М.", True)])
     s.transfer(10, "+79991234567", account="0000000000")
