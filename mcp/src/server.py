@@ -3180,7 +3180,8 @@ async def choose_recipient_bank(phone: str, ctx: Context) -> str:
     сразу, не откладывая — они живут минуты.
 
     Банк, совпадающий с нашим собственным, помечен недоступным: перевод внутри
-    банка по номеру телефона здесь не реализован (в приложении банка он есть)."""
+    банка идёт НЕ через СБП, а отдельной ручкой, которой в этом туле нет.
+    В приложении банка такой перевод работает."""
     try:
         s = _require(); s.ensure_fresh()
         resolved = s.resolve_sbp_recipient(phone)
@@ -3193,9 +3194,10 @@ async def choose_recipient_bank(phone: str, ctx: Context) -> str:
         guard.remember_requisites(phone, options)
         usable = [o for o in options if o["supported"]]
         if not usable:
-            return (f"{phone}: единственный банк получателя — этот же банк, а перевод "
-                    f"внутри банка по номеру здесь не реализован. В приложении банка "
-                    f"он есть. Скажи это пользователю.")
+            return (f"{phone}: в СБП получатель значится только в этом же банке, а "
+                    f"перевод внутри банка идёт не через СБП — отдельной ручкой, "
+                    f"которой в этом туле нет. В приложении банка он работает. "
+                    f"Скажи это пользователю прямо.")
         if len(usable) == 1 and len(options) == 1:
             o = usable[0]
             return _picked_text(o)
