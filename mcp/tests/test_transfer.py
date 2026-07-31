@@ -583,6 +583,46 @@ def test_a_refusal_is_not_reported_as_a_possible_charge():
     print("  outcomes: refusals and rejections say the money is safe; only transport is unknown")
 
 
+def test_a_client_of_our_own_bank_is_paid_by_contract_or_card():
+    """Перевод клиенту ЭТОГО ЖЕ банка идёт не через СБП и не по телефону.
+
+    Десять отказов подряд объяснялись тем, что маршрут искали в СБП, где его нет.
+    Провайдер и поля не угаданы — их назвал каталог самого банка:
+    payment_providers(group="Переводы", provider_id="transfer-inner-third-party")
+    → «Клиенту Т-Банка»: bankCard 16–19 цифр ИЛИ bankContract 10 цифр,
+    message до 250 символов. Конверт проверен живой комиссией."""
+    from src.client import TbankApiError
+
+    s = CaptureSession()
+    s.transfer(10, "5129287081", description="за кофе", account="0000000000",
+               provider="transfer-inner-third-party")
+    pp = s.sent_pay_parameters()
+    check(pp["provider"] == "transfer-inner-third-party",
+          f"провайдер подменён: {pp['provider']}")
+    check(pp["providerFields"] == {"bankContract": "5129287081", "message": "за кофе"},
+          f"поля не по схеме банка: {pp['providerFields']}")
+
+    # Карта — второй разрешённый вид получателя.
+    s = CaptureSession()
+    s.transfer(10, "5536 9138 1234 5678", account="0000000000",
+               provider="transfer-inner-third-party")
+    check(s.sent_pay_parameters()["providerFields"] == {"bankCard": "5536913812345678"},
+          f"карта не распознана: {s.sent_pay_parameters()['providerFields']}")
+
+    # Телефон сюда не подходит — и это надо сказать до отправки, а не получить
+    # общую ошибку шлюза.
+    s = CaptureSession()
+    try:
+        s.transfer(10, "+79991234567", account="0000000000",
+                   provider="transfer-inner-third-party")
+        check(False, "телефон принят как получатель внутреннего перевода")
+    except TbankApiError as e:
+        check(e.result_code == "INVALID_RECIPIENT", f"не тот отказ: {e.result_code}")
+        check("договор" in str(e.message).lower(),
+              "в отказе не сказано, что нужен номер договора или карты")
+    print("  клиенту своего банка: по договору или карте, не по телефону")
+
+
 def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
     """Резолв зовётся с withTinkoff=true, поэтому свой же банк попадает в список
     кандидатов и часто оказывается ДЕФОЛТНЫМ: получатель — клиент того же банка.
@@ -627,8 +667,10 @@ def test_a_recipient_inside_our_own_bank_is_refused_not_routed():
         check("Т-Банк" in str(e.message),
               "свой банк вычеркнут из списка — агент скажет, что его у получателя "
               "нет, и это будет неправдой")
-        check("приложении" in str(e.message),
-              "не сказано, где этот перевод всё-таки возможен")
+        check("transfer-inner-third-party" in str(e.message),
+              "не назван настоящий маршрут перевода клиенту своего банка")
+        check("договор" in str(e.message).lower(),
+              "не сказано, что нужен номер договора или карты, а не телефон")
         # Идентификаторы в тексте отказа — ловушка. Этот резолв прошёл ВНУТРИ
         # transfer(), мимо тула transfer_sbp_resolve, поэтому фаервол его не
         # видел и такие реквизиты не признает: агент берёт их из ошибки,
@@ -930,6 +972,7 @@ def main():
     test_a_refusal_is_not_reported_as_a_possible_charge()
     test_the_recipient_bank_the_user_picked_is_the_one_used()
     test_a_recipient_inside_our_own_bank_is_refused_not_routed()
+    test_a_client_of_our_own_bank_is_paid_by_contract_or_card()
     if failures:
         print("\nFAILED:")
         for f in failures:

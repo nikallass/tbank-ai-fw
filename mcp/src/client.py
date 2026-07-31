@@ -57,6 +57,21 @@ SBP_PHONE_POINTER_TYPE = "8276"
 # «Т-Банк» и у неё, в отличие от остальных, ПУСТОЕ имя получателя.
 TBANK_SBP_MEMBER_ID = "100000000004"
 
+# Что делать, когда получатель — клиент этого же банка. Текст один на все места,
+# где это выясняется, потому что путь тоже один.
+#
+# Провайдер и поля названы КАТАЛОГОМ БАНКА, не угаданы:
+# payment_providers(group="Переводы", provider_id="transfer-inner-third-party")
+# → «Клиенту Т-Банка»: bankCard 16–19 цифр ИЛИ bankContract 10 цифр, message до 250.
+_INNER_ROUTE_HINT = (
+    "Перевод клиенту этого же банка идёт НЕ через СБП: у СБП такого маршрута нет, "
+    "и p2p-anybank его не проводит. Правильный путь — "
+    "transfer(provider='transfer-inner-third-party', to_account=<номер ДОГОВОРА "
+    "получателя (10 цифр) или его КАРТЫ (16–19 цифр)>). Номер телефона здесь не "
+    "подходит: банк ищет получателя по договору или карте. Спроси у пользователя "
+    "номер договора или карты получателя — из телефона он не выводится."
+)
+
 
 def _with_candidates(err: "TbankApiError", resolved: list) -> "TbankApiError":
     """Приложить список банков получателя к отказу «нужен выбор».
@@ -2905,6 +2920,11 @@ class MobileSession:
           NOT to pay — no real pay body carries it.
         between own accounts (provider='transfer-inner'): to_account = target account;
           providerFields = {'bankContract': to_account}.
+        to ANOTHER client of this bank (provider='transfer-inner-third-party'):
+          to_account = the recipient's CONTRACT number (10 digits) or CARD
+          (16-19 digits). Not a phone: the bank routes this outside SBP entirely.
+          Fields come from the bank's own catalogue, not from a guess —
+          payment_providers(group="Переводы", provider_id="transfer-inner-third-party").
         by details (provider='transfer-legal'): NOT supported for the PAYMENT. The
           providerFields shape IS known — four captured payment_commission bodies
           carry all nine keys (bankAcnt/bankBik/bankCorrAcnt/bankName/addressee/
@@ -2930,6 +2950,29 @@ class MobileSession:
         src = account or self._source_account()
         if provider == "transfer-inner":
             pf = {"bankContract": to_account}
+        elif provider == "transfer-inner-third-party":
+            # Перевод ДРУГОМУ клиенту этого же банка. Не через СБП — у СБП такого
+            # маршрута нет вовсе, и именно поэтому свой банк то появлялся в выдаче
+            # резолва, то пропадал, а платежи по нему упирались в общую ошибку.
+            #
+            # Схему полей отдал сам банк (payment_providers(group="Переводы",
+            # provider_id="transfer-inner-third-party") → «Клиенту Т-Банка»):
+            # bankCard 16–19 цифр ИЛИ bankContract 10 цифр, плюс message до 250.
+            # Ничего не угадано: и провайдер, и поля названы каталогом банка.
+            #
+            # По номеру ТЕЛЕФОНА этот перевод не делается — нужен номер договора
+            # или карты получателя. Так устроено у банка, а не у нас.
+            digits = re.sub(r"\D", "", to_account or "")
+            if len(digits) == 10:
+                pf = {"bankContract": digits}
+            elif 16 <= len(digits) <= 19:
+                pf = {"bankCard": digits}
+            else:
+                raise TbankApiError("INVALID_RECIPIENT",
+                    f"Для перевода клиенту этого же банка нужен номер ДОГОВОРА "
+                    f"(10 цифр) или КАРТЫ (16–19 цифр) получателя, а не телефон. "
+                    f"Получено: {len(digits)} цифр. Номер телефона здесь не "
+                    f"работает — у банка это отдельный маршрут, не СБП.")
         elif provider == "transfer-legal":
             # The refusal stands, but its stated reason was false: four captured
             # payment_commission requests carry the full 9-key providerFields shape
@@ -2962,12 +3005,7 @@ class MobileSession:
                 # по одному лишь bankMemberId, и без этого выбор своего банка
                 # проскочил бы мимо запрета и упёрся в общую ошибку шлюза.
                 raise TbankApiError("RECIPIENT_INSIDE_TBANK",
-                    f"Выбран этот же банк ({to_account}). Перевод внутри банка идёт НЕ "
-                    f"через СБП, а отдельной ручкой, которой в этом туле нет: "
-                    f"p2p-anybank такой платёж не проводит, шлюз отвечает общей "
-                    f"ошибкой. В приложении банка этот перевод работает. Выбери "
-                    f"внешний банк получателя или скажи пользователю переводить в "
-                    f"приложении.")
+                    f"Выбран этот же банк ({to_account}). {_INNER_ROUTE_HINT}")
             if bank_member_id and not pointer_link_id:
                 # Банк выбран, связка не передана — и это НОРМАЛЬНЫЙ путь.
                 #
@@ -3030,8 +3068,8 @@ class MobileSession:
                     # такой платёж не проводит (шлюз отвечает общей ошибкой).
                     lines = []
                     for x in resolved:
-                        mark = ("  ← через этот тул не проводится, только в "
-                                "приложении банка"
+                        mark = ("  ← не по телефону: перевод клиенту этого же банка "
+                                "идёт по договору или карте, см. ниже"
                                 if str(x["bank_member_id"]) == TBANK_SBP_MEMBER_ID
                                 else "")
                         lines.append(f"  - {x['masked_fio'] or 'без имени'} | "
@@ -3044,17 +3082,11 @@ class MobileSession:
                     if not external:
                         raise _with_candidates(TbankApiError("RECIPIENT_INSIDE_TBANK",
                             f"{to_account} в СБП значится только в этом же банке:\n" +
-                            "\n".join(lines) +
-                            "\nПеревод внутри банка идёт НЕ через СБП, а отдельной "
-                            "ручкой, которой в этом туле нет. В приложении банка такой "
-                            "перевод работает. Скажи это пользователю прямо, не "
-                            "выдумывай обходных маршрутов и не утверждай, что банка у "
-                            "получателя нет — СБП про внутренние переводы просто не "
-                            "знает."), resolved)
+                            "\n".join(lines) + "\n" + _INNER_ROUTE_HINT), resolved)
                     raise _with_candidates(TbankApiError("RECIPIENT_MULTIPLE_BANKS",
                         f"{to_account} есть в {len(resolved)} банках СБП, и по "
                         f"умолчанию ведёт в этот же банк — нужен выбор:\n" +
-                        "\n".join(lines) + tail), resolved)
+                        "\n".join(lines) + "\n" + _INNER_ROUTE_HINT + tail), resolved)
                 pick = next((x for x in resolved if x["is_default_bank"]), None)
                 if pick is None and len(resolved) == 1:
                     pick = resolved[0]

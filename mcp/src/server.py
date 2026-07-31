@@ -1542,6 +1542,10 @@ def transfer(amount: float, to_account: str, description: str = "",
     pointerLinkId банк перевыпускает за минуты, и проверка реквизитов сверяет их
     со свежим резолвом. Старые не пройдут, а повтор вызова ничего не изменит.
     Между своими счетами: provider='transfer-inner', to_account=счёт-получатель.
+    КЛИЕНТУ ЭТОГО ЖЕ БАНКА: provider='transfer-inner-third-party',
+    to_account = номер ДОГОВОРА получателя (10 цифр) или его КАРТЫ (16–19 цифр).
+    По телефону такой перевод не делается: у банка это отдельный маршрут, не СБП.
+    Провайдер и поля названы каталогом банка (payment_providers), не угаданы.
     description — сообщение получателю.
     force=True — повторить перевод, который уже помечен как незавершённый. Только
     после того, как пользователь ПРОВЕРИЛ в приложении, что деньги не ушли.
@@ -3155,7 +3159,9 @@ def _bank_options(resolved: list) -> list[dict]:
             "pointer_link_id": x.get("pointer_link_id"),
             "is_default_bank": bool(x.get("is_default_bank")),
             "supported": not internal,
-            "unsupported_reason": "только в приложении банка" if internal else "",
+            # Не «недоступен», а «другим способом»: маршрут есть, просто он не по
+            # телефону и не через СБП.
+            "unsupported_reason": "по договору или карте, не по телефону" if internal else "",
         })
     return out
 
@@ -3179,9 +3185,9 @@ async def choose_recipient_bank(phone: str, ctx: Context) -> str:
     bank_member_id и pointer_link_id выбранного банка: передай их в transfer()
     сразу, не откладывая — они живут минуты.
 
-    Банк, совпадающий с нашим собственным, помечен недоступным: перевод внутри
-    банка идёт НЕ через СБП, а отдельной ручкой, которой в этом туле нет.
-    В приложении банка такой перевод работает."""
+    Банк, совпадающий с нашим собственным, помечен особо: перевод клиенту этого
+    же банка идёт НЕ через СБП и НЕ по телефону, а по номеру договора или карты —
+    transfer(provider='transfer-inner-third-party', to_account=<договор|карта>)."""
     try:
         s = _require(); s.ensure_fresh()
         resolved = s.resolve_sbp_recipient(phone)
@@ -3194,10 +3200,8 @@ async def choose_recipient_bank(phone: str, ctx: Context) -> str:
         guard.remember_requisites(phone, options)
         usable = [o for o in options if o["supported"]]
         if not usable:
-            return (f"{phone}: в СБП получатель значится только в этом же банке, а "
-                    f"перевод внутри банка идёт не через СБП — отдельной ручкой, "
-                    f"которой в этом туле нет. В приложении банка он работает. "
-                    f"Скажи это пользователю прямо.")
+            from .client import _INNER_ROUTE_HINT
+            return f"{phone}: в СБП получатель значится только в этом же банке.\n{_INNER_ROUTE_HINT}"
         if len(usable) == 1 and len(options) == 1:
             o = usable[0]
             return _picked_text(o)
